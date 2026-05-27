@@ -24,11 +24,11 @@ STAGES = [
     ("calm", 0.12, 400_000, 0.010),
     ("calm", 0.45, 350_000, 0.010),
     ("moderate", 0.75, 450_000, 0.007),
-    ("hard", 1.00, 1_800_000, 0.005),
+    ("hard", 1.00, 1_400_000, 0.005),
 ]
 N_ENVS = 8
 STEP_PENALTY = 0.08
-N_STACK = 6  # frame stacking ("memory"): policy sees the last N_STACK observations
+N_STACK = 4  # frame stacking ("memory"): policy sees the last N_STACK observations
 
 
 def main() -> int:
