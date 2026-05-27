@@ -34,7 +34,7 @@ N_STACK = 4  # frame stacking ("memory"): policy sees the last N_STACK observati
 def main() -> int:
     from stable_baselines3 import PPO
     from stable_baselines3.common.env_util import make_vec_env
-    from stable_baselines3.common.vec_env import SubprocVecEnv
+    from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
     from rocketsim.envs import make_landing_env
 
@@ -48,7 +48,12 @@ def main() -> int:
             init_scale=init_scale,
             n_stack=N_STACK,
         )
-        return make_vec_env(fn, n_envs=N_ENVS, vec_env_cls=SubprocVecEnv)
+        venv = make_vec_env(fn, n_envs=N_ENVS, vec_env_cls=SubprocVecEnv)
+        # Normalize the reward (running std) so PPO is invariant to the reward
+        # scale. The precision-weighted reward kept diverging because larger
+        # coefficients inflated the value targets; normalization decouples reward
+        # shaping from training stability. (norm_obs=False: obs already scaled.)
+        return VecNormalize(venv, norm_obs=False, norm_reward=True, gamma=0.99, clip_reward=20.0)
 
     model = None
     for i, (difficulty, init_scale, steps, ent) in enumerate(STAGES):
