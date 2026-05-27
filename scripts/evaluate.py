@@ -29,7 +29,7 @@ def eval_pid(env, n):
         pid = LandingPID(env.base, env.world)  # nominal model only
         done = False
         while not done:
-            cmd = pid(env.t, env.state)
+            cmd = pid(env.t, env.measured)  # PID sees the (noisy) measurement, same as RL
             obs, r, term, trunc, info = env.step(env.command_to_action(cmd))
             done = term or trunc
         succ += int(info.get("success", False))
@@ -58,7 +58,10 @@ def eval_model(env, model, n):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--policy", default="pid", help="'pid' or path to an SB3 .zip model")
-    ap.add_argument("--difficulty", default="hard", choices=["calm", "moderate", "hard"])
+    ap.add_argument(
+        "--difficulty", default="hard",
+        choices=["calm", "moderate", "hard", "unknown", "recovery", "noisy"],
+    )
     ap.add_argument("--episodes", type=int, default=100)
     ap.add_argument("--residual", action="store_true", help="evaluate a residual-RL model (PID + correction)")
     ap.add_argument("--residual-scale", type=float, default=0.4)

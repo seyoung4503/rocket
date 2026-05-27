@@ -19,16 +19,19 @@ from functools import partial
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-# (difficulty, init_scale, steps, ent_coef)
+# (difficulty, init_scale, steps, ent_coef, obs_noise) — ramp start difficulty
+# AND sensor noise; the final stage is the full "noisy" regime (moderate wind +
+# 2x measurement noise) where naive PID collapses to ~21%.
 STAGES = [
-    ("calm", 0.12, 400_000, 0.010),
-    ("calm", 0.45, 350_000, 0.010),
-    ("moderate", 0.75, 450_000, 0.007),
-    ("hard", 1.00, 1_400_000, 0.005),
+    ("calm", 0.12, 400_000, 0.010, 0.0),
+    ("calm", 0.50, 350_000, 0.010, 0.7),
+    ("moderate", 0.80, 450_000, 0.007, 1.3),
+    ("moderate", 1.00, 1_500_000, 0.005, 2.0),
 ]
 N_ENVS = 8
 STEP_PENALTY = 0.08
-N_STACK = 4  # frame stacking ("memory"): policy sees the last N_STACK observations
+N_STACK = 6  # frame stacking ("memory"): more frames -> better temporal noise filtering
+FINAL_OUT = "models/ppo_noisy.zip"
 
 
 def main() -> int:
@@ -40,13 +43,14 @@ def main() -> int:
 
     os.makedirs("models", exist_ok=True)
 
-    def venv_for(difficulty, init_scale):
+    def venv_for(difficulty, init_scale, obs_noise):
         fn = partial(
             make_landing_env,
             difficulty,
             step_penalty=STEP_PENALTY,
             init_scale=init_scale,
             n_stack=N_STACK,
+            obs_noise=obs_noise,
         )
         venv = make_vec_env(fn, n_envs=N_ENVS, vec_env_cls=SubprocVecEnv)
         # Normalize the reward (running std) so PPO is invariant to the reward
@@ -56,8 +60,8 @@ def main() -> int:
         return VecNormalize(venv, norm_obs=False, norm_reward=True, gamma=0.99, clip_reward=20.0)
 
     model = None
-    for i, (difficulty, init_scale, steps, ent) in enumerate(STAGES):
-        venv = venv_for(difficulty, init_scale)
+    for i, (difficulty, init_scale, steps, ent, obs_noise) in enumerate(STAGES):
+        venv = venv_for(difficulty, init_scale, obs_noise)
         if model is None:
             model = PPO(
                 "MlpPolicy",
@@ -82,16 +86,15 @@ def main() -> int:
             model.set_env(venv)
             model.ent_coef = ent
         print(f"\n=== STAGE {i+1}/{len(STAGES)}: {difficulty} init_scale={init_scale} "
-              f"steps={steps} ent={ent} ===", flush=True)
+              f"obs_noise={obs_noise} steps={steps} ent={ent} ===", flush=True)
         model.learn(total_timesteps=steps, progress_bar=False, reset_num_timesteps=(i == 0))
         out = f"models/ppo_stage{i+1}_{difficulty}.zip"
         model.save(out)
         print(f"STAGE {i+1} saved {out}", flush=True)
         venv.close()
 
-    final = "models/ppo_mem_hard.zip" if N_STACK > 1 else "models/ppo_hard.zip"
-    model.save(final)
-    print(f"saved {final}", flush=True)
+    model.save(FINAL_OUT)
+    print(f"saved {FINAL_OUT}", flush=True)
     return 0
 
 

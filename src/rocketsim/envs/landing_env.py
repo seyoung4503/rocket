@@ -44,11 +44,18 @@ class LandingEnv(gym.Env):
         residual: bool = False,
         residual_scale: float = 0.4,
         n_stack: int = 1,
+        obs_noise: float = 0.0,
         seed: int | None = None,
     ):
         super().__init__()
         self.step_penalty = step_penalty
         self.init_scale = init_scale
+        # Sensor noise / partial observability: the controller sees a noisy
+        # MEASUREMENT, not the true state. PID's derivative (damping) terms
+        # amplify velocity/rate noise -> jitter; a memory policy can average it
+        # out over frames. obs_noise scales the baseline measurement stds.
+        self.obs_noise = obs_noise
+        self.measured = None
         # Residual RL: the PID baseline produces the action; the policy only adds
         # a bounded correction (residual_scale * action). The policy thus starts
         # from PID's behavior and learns just the gust-precision it misses.
@@ -88,10 +95,29 @@ class LandingEnv(gym.Env):
 
     # --- helpers ------------------------------------------------------------
 
-    def _raw_obs(self) -> np.ndarray:
-        s = self.state
+    def _measure(self) -> np.ndarray:
+        """Noisy measurement of the true state (what the controller is allowed
+        to see). Returns the true state when obs_noise == 0."""
         from .. import quaternion as quat
 
+        s = self.state.copy()
+        k = self.obs_noise
+        if k <= 0.0:
+            return s
+        rng = self._rng
+        s[dyn.POS] += rng.normal(0.0, 0.05 * k, 3)
+        s[dyn.VEL] += rng.normal(0.0, 0.20 * k, 3)  # velocity is the noisy one
+        s[dyn.OMEGA] += rng.normal(0.0, 0.08 * k, 3)
+        # attitude: perturb by a small random rotation
+        a = rng.normal(0.0, np.deg2rad(1.5) * k, 3)
+        dq = quat.quat_normalize(np.array([1.0, a[0] / 2, a[1] / 2, a[2] / 2]))
+        s[dyn.QUAT] = quat.quat_normalize(quat.quat_mult(s[dyn.QUAT], dq))
+        return s
+
+    def _raw_obs(self) -> np.ndarray:
+        from .. import quaternion as quat
+
+        s = self.measured if self.measured is not None else self.state
         body_z = quat.quat_rotate(s[dyn.QUAT], np.array([0.0, 0.0, 1.0]))
         return np.concatenate(
             [
@@ -141,6 +167,7 @@ class LandingEnv(gym.Env):
         self.state = self.scenario.sample_initial_state(self._rng, scale=self.init_scale)
         self.t = 0.0
         self._prev_gimbal = np.zeros(2)
+        self.measured = self._measure()
         self._prev_phi = self.scenario.potential(self.state)
         if self.residual:
             from ..controllers import LandingPID
@@ -150,8 +177,8 @@ class LandingEnv(gym.Env):
 
     def step(self, action: np.ndarray):
         if self.residual:
-            # base PID action for the current state + bounded policy correction
-            base_a = self.command_to_action(self._base_ctrl(self.t, self.state))
+            # base PID action (on the measured state) + bounded policy correction
+            base_a = self.command_to_action(self._base_ctrl(self.t, self.measured))
             action = np.clip(base_a + self.residual_scale * np.asarray(action), -1.0, 1.0)
         cmd = self.action_to_command(action)
         target_gimbal = np.array([cmd.gimbal_x, cmd.gimbal_y])
@@ -171,6 +198,8 @@ class LandingEnv(gym.Env):
             done, reason = self.scenario.check_done(self.state, self.t)
             if done:
                 break
+
+        self.measured = self._measure()  # noisy measurement for obs + next-step PID
 
         # Potential-difference shaping (Phi' - Phi): a fixed point gives ZERO
         # shaping, so hovering can't farm reward. A small step penalty actively
@@ -197,6 +226,10 @@ def make_landing_env(difficulty: str = "calm", **kwargs) -> LandingEnv:
     if difficulty == "recovery":
         dist, rand = D.moderate()  # mild wind/plant — isolate the attitude recovery
         scenario = LandingScenario.recovery()
+    elif difficulty == "noisy":
+        dist, rand = D.moderate()  # mild wind/plant — isolate the sensor-noise effect
+        scenario = LandingScenario()
+        kwargs.setdefault("obs_noise", 2.0)  # heavy noise: PID (no filter) drops to ~21%
     else:
         dist, rand = presets[difficulty]()
         scenario = LandingScenario.hard() if difficulty == "hard" else LandingScenario()
