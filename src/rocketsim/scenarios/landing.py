@@ -142,15 +142,21 @@ class LandingScenario:
 
     def terminal_reward(self, state: np.ndarray, reason: str) -> float:
         if reason == "touchdown":
-            if self.is_soft_landing(state):
-                return 100.0
+            # Graded, monotonic in landing quality: a perfect touchdown ~ +100,
+            # a sloppy one is floored well above the hover/timeout value so that
+            # *reaching the ground* always beats hovering, and *softer* always
+            # beats harder. This gives a smooth gradient toward soft landings
+            # (a binary soft/hard bonus leaves the agent stuck hovering).
             vel, pos = state[dyn.VEL], state[dyn.POS]
-            # hard but on the ground: penalty grows with how badly it missed
-            pen = 10.0
-            pen += 15.0 * max(0.0, -vel[2] - self.max_touchdown_vspeed)
-            pen += 10.0 * max(0.0, np.linalg.norm(vel[:2]) - self.max_touchdown_hspeed)
-            pen += 10.0 * max(0.0, np.linalg.norm(pos[:2]) - self.max_touchdown_offset)
-            return -float(min(pen, 60.0))
+            vspeed = max(0.0, -vel[2])
+            hspeed = float(np.linalg.norm(vel[:2]))
+            offset = float(np.linalg.norm(pos[:2]))
+            tilt = quat.tilt_angle(state[dyn.QUAT])
+            cost = 25.0 * vspeed + 20.0 * hspeed + 20.0 * offset + 60.0 * tilt
+            r = 100.0 - cost
+            if self.is_soft_landing(state):
+                r += 30.0  # extra bonus for clearing every threshold
+            return float(np.clip(r, -40.0, 130.0))
         if reason in ("crash_tilt", "out_of_bounds", "too_high"):
             return -100.0
         if reason == "timeout":
