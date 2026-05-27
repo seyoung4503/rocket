@@ -32,10 +32,19 @@ class Trajectory:
 
 
 class Simulator:
-    def __init__(self, vehicle: Vehicle, env: Environment | None = None, dt: float = 0.002):
+    def __init__(
+        self,
+        vehicle: Vehicle,
+        env: Environment | None = None,
+        dt: float = 0.002,
+        disturbance=None,
+        rng: np.random.Generator | None = None,
+    ):
         self.vehicle = vehicle
         self.env = env or Environment()
         self.dt = dt
+        self.disturbance = disturbance
+        self.rng = rng or np.random.default_rng()
         self._prev_gimbal = np.array([0.0, 0.0])
 
     def _rate_limit_gimbal(self, target: np.ndarray) -> np.ndarray:
@@ -55,6 +64,8 @@ class Simulator:
         after recording that step (used for landing/episode termination)."""
         state = initial_state.copy()
         self._prev_gimbal = np.array([0.0, 0.0])
+        if self.disturbance is not None:
+            self.disturbance.reset(self.rng)
         traj = Trajectory()
         n_steps = int(round(duration / self.dt))
         for i in range(n_steps):
@@ -70,5 +81,9 @@ class Simulator:
             if terminate is not None and terminate(t, state):
                 break
 
-            state = dyn.rk4_step(state, applied, self.dt, self.vehicle, self.env)
+            if self.disturbance is not None:
+                wind, fext = self.disturbance.step(t, self.dt, self.rng)
+            else:
+                wind = fext = None
+            state = dyn.rk4_step(state, applied, self.dt, self.vehicle, self.env, wind, fext)
         return traj

@@ -58,6 +58,19 @@ class LandingScenario:
 
     pad_alt: float = 0.0  # m
 
+    @classmethod
+    def hard(cls) -> "LandingScenario":
+        """Aggressive start: higher, faster descent, big offset/tilt/lateral vel.
+        Success thresholds are unchanged (a soft landing is a soft landing)."""
+        return cls(
+            start_alt=(10.0, 14.0),
+            start_descent=(-2.0, -5.0),
+            start_offset=3.0,
+            start_tilt_deg=20.0,
+            start_lateral_vel=2.0,
+            timeout=35.0,  # starts higher + may hover to re-center before commit
+        )
+
     def sample_initial_state(self, rng: np.random.Generator | None = None) -> np.ndarray:
         rng = rng or np.random.default_rng()
         alt = rng.uniform(*self.start_alt)

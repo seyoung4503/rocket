@@ -28,11 +28,17 @@ class Vehicle:
     gimbal_limit: float = np.deg2rad(12.0)  # rad, max deflection per axis
     gimbal_rate_limit: float = np.deg2rad(200.0)  # rad/s, actuator slew rate
 
-    # Aerodynamics (simple quadratic drag opposing velocity)
+    # Aerodynamics (simple quadratic drag opposing airspeed)
     drag_coeff: float = 0.5
-    ref_area: float = 0.0079  # m^2, ~10 cm diameter tube
+    ref_area: float = 0.0079  # m^2, ~10 cm diameter tube (axial)
+    side_area: float = 0.045  # m^2, ~10 cm dia x 45 cm body (catches crosswind)
+
+    # Constant thrust/CG misalignment, modeled as a fixed gimbal bias (rad).
+    # The controller does NOT know about this -> a steady torque disturbance.
+    thrust_misalign: np.ndarray = field(default_factory=lambda: np.zeros(2))
 
     def __post_init__(self) -> None:
+        self.thrust_misalign = np.asarray(self.thrust_misalign, dtype=float)
         self.inertia = np.asarray(self.inertia, dtype=float)
         self.inertia_inv = np.linalg.inv(self.inertia)
 

@@ -29,25 +29,29 @@ class HoverPID:
         env: Environment,
         target=(0.0, 0.0, 5.0),
         # position (horizontal) gains
-        kp_pos: float = 1.2,
-        kd_pos: float = 2.0,
+        kp_pos: float = 1.6,
+        kd_pos: float = 2.4,
+        ki_pos: float = 0.6,  # rejects steady wind (constant horizontal force)
         # altitude gains
         kp_z: float = 6.0,
         kd_z: float = 4.0,
-        ki_z: float = 1.5,
-        # attitude gains
-        kp_att: float = 80.0,
-        kd_att: float = 16.0,
-        max_tilt: float = np.deg2rad(20.0),
+        ki_z: float = 1.5,  # rejects unknown mass (wrong hover throttle)
+        # attitude gains (stiff -> fast rejection of gust torque)
+        kp_att: float = 130.0,
+        kd_att: float = 24.0,
+        ki_att: float = 55.0,  # rejects constant thrust/CG misalignment torque
+        max_tilt: float = np.deg2rad(25.0),
     ):
         self.v = vehicle
         self.env = env
         self.target = np.asarray(target, dtype=float)
-        self.kp_pos, self.kd_pos = kp_pos, kd_pos
+        self.kp_pos, self.kd_pos, self.ki_pos = kp_pos, kd_pos, ki_pos
         self.kp_z, self.kd_z, self.ki_z = kp_z, kd_z, ki_z
-        self.kp_att, self.kd_att = kp_att, kd_att
+        self.kp_att, self.kd_att, self.ki_att = kp_att, kd_att, ki_att
         self.max_tilt = max_tilt
         self._z_int = 0.0
+        self._xy_int = np.zeros(2)
+        self._att_int = np.zeros(3)
         self._last_t = 0.0
 
     def __call__(self, t: float, state: np.ndarray) -> Command:
@@ -62,12 +66,15 @@ class HoverPID:
 
         # --- Outer loop: desired world-frame thrust vector ---
         pos_err = self.target - pos
-        # altitude with integral term
+        # altitude with integral term (anti-windup clamp)
         self._z_int += pos_err[2] * dt
         self._z_int = float(np.clip(self._z_int, -5.0, 5.0))
         a_z = self.kp_z * pos_err[2] - self.kd_z * vel[2] + self.ki_z * self._z_int
 
-        a_xy = self.kp_pos * pos_err[:2] - self.kd_pos * vel[:2]
+        # horizontal with integral term (rejects steady wind)
+        self._xy_int += pos_err[:2] * dt
+        self._xy_int = np.clip(self._xy_int, -3.0, 3.0)
+        a_xy = self.kp_pos * pos_err[:2] - self.kd_pos * vel[:2] + self.ki_pos * self._xy_int
 
         f_des = v.mass * np.array([a_xy[0], a_xy[1], a_z + self.env.gravity])
 
@@ -88,12 +95,17 @@ class HoverPID:
 
         throttle = float(np.clip(f_mag / v.max_thrust, 0.0, 1.0))
 
-        # --- Inner loop: attitude PD on body-z alignment ---
+        # --- Inner loop: attitude PID on body-z alignment ---
         bz_world = quat.quat_rotate(q, np.array([0.0, 0.0, 1.0]))
         err_world = np.cross(bz_world, z_des)  # ~ axis * sin(angle), world frame
         R = quat.quat_to_rotmat(q)
         err_body = R.T @ err_world
-        torque_des = v.inertia @ (self.kp_att * err_body - self.kd_att * omega)
+        # integral cancels a constant misalignment torque (anti-windup clamp)
+        self._att_int += err_body * dt
+        self._att_int = np.clip(self._att_int, -0.5, 0.5)
+        torque_des = v.inertia @ (
+            self.kp_att * err_body - self.kd_att * omega + self.ki_att * self._att_int
+        )
 
         # --- Map desired torque to gimbal angles ---
         # torque_x ≈ -L*T*gx,  torque_y ≈ -L*T*gy   (small-angle gimbal model)

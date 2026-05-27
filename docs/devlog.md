@@ -64,4 +64,32 @@
 - 원격 Initial commit 위에 로컬 작업을 얹어 히스토리 선형 유지. 프로젝트 README로 대체.
 - `main` 브랜치 푸시 완료(커밋 `08aabb6`). `.venv/`, `out/`, `__pycache__/`는 `.gitignore`로 제외.
 
+## 2026-05-27 14:03 (KST) — 난이도 상향(외란·도메인 랜덤화) + PID 난이도 곡선
+
+**개념 (사용자 Q&A)**
+- "헬리콥터 세우기"는 **고전 제어 벤치마크**지 RL 전용 문제가 아님. 호버/착륙=평형 근처 (준)선형 문제라 PID/LQR이 보통 RL과 대등하거나 우위. RL이 빛난 건 호버가 아니라 곡예기동/시연학습.
+- RL은 아직 **미착수**. 단 `reward()`/`check_done()`/`DisturbanceModel`/`Randomization`은 RL 환경의 재료로 이미 작성됨.
+
+**구현한 것**
+- `vehicle.py` — `side_area`(크로스윈드 면적), `thrust_misalign`(상수 추력/CG 오정렬=상시 토크 외란) 추가.
+- `dynamics.py` — 항력을 **대기 상대속도**(v-wind) 기준으로, `external_force`(돌풍 하중) 주입, 오정렬 반영.
+- `scenarios/disturbances.py` — `DisturbanceModel`(평균풍+OU 돌풍+랜덤력), `Randomization`(질량/추력/오정렬/CG 에피소드별 랜덤). 프리셋 `calm/moderate/hard`.
+- `simulator.py` — 외란 주입(에피소드마다 reset, 스텝마다 wind/force 적용).
+- `controllers/pid.py` — **수평 위치·자세 적분항** 추가(정상 바람·오정렬 제거), 게인 상향, anti-windup.
+- `controllers/landing.py` — **착륙 게이트**: 중심·수직·저속이 아니면 하강을 늦추고, **고도가 낮을수록 더 빡세게**(gust-pushed 접지 방지). creep로 최소 하강 보장.
+- `scripts/compare_difficulty.py` — calm/moderate/hard 성공률 + 실패원인 분해. 컨트롤러엔 **공칭 모델만** 주고 시뮬엔 **랜덤화 기체**(모델 불일치).
+
+**결과 (검증됨, n=50)**
+| 난이도 | 성공률 | 접지 vspeed | 비고 |
+|---|---|---|---|
+| CALM | 100% | 0.17 | 크래시 0 |
+| MODERATE | **98%** | 0.11 | PID가 현실 외란을 설득력 있게 처리 |
+| HARD | 58% | 0.09 | 실패=접지순간 돌풍(offset 14·tilt 12·hspeed 6), 타임아웃/수직속도 0 |
+
+- 튜닝 교훈: hard에서 게이트 과도하게 빡세면 타임아웃(8%), 느슨하면 off-nominal 접지(45%) → 균형점 58%. 자세 강성 추가로는 한계 → **고정 게인 PID의 본질적 한계(접지 순간 무작위 돌풍 예측 불가)**. 여기가 RL 동기.
+
+**다음**
+- [ ] Gymnasium 환경(`envs/landing_env.py`)으로 시나리오 래핑 → RL(hard에서 PID 58% 돌파 목표).
+- [ ] PID vs RL 공정 비교(동일 시나리오·외란·랜덤화).
+
 <!-- 새 항목은 이 줄 위에 추가 -->

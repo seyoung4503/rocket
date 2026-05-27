@@ -67,16 +67,28 @@ def state_derivative(
     cmd: np.ndarray,
     vehicle: Vehicle,
     env: Environment,
+    wind: np.ndarray | None = None,
+    external_force: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Continuous-time derivative of the state given a (clamped) command."""
+    """Continuous-time derivative of the state given a (clamped) command.
+
+    ``wind`` (world-frame air velocity, m/s) makes drag act on the airspeed
+    relative to the moving air. ``external_force`` (world frame, N) is an extra
+    disturbance (e.g. a gust load). Both default to zero.
+    """
+    wind = np.zeros(3) if wind is None else wind
+    external_force = np.zeros(3) if external_force is None else external_force
+
     q = state[QUAT]
     v_world = state[VEL]
     omega = state[OMEGA]
     thrust = state[THRUST]
 
     throttle = float(np.clip(cmd[0], 0.0, 1.0))
-    gx = float(np.clip(cmd[1], -vehicle.gimbal_limit, vehicle.gimbal_limit))
-    gy = float(np.clip(cmd[2], -vehicle.gimbal_limit, vehicle.gimbal_limit))
+    # Constant thrust/CG misalignment adds to the commanded gimbal (unknown to
+    # the controller), then the physical gimbal limit clamps the total.
+    gx = float(np.clip(cmd[1] + vehicle.thrust_misalign[0], -vehicle.gimbal_limit, vehicle.gimbal_limit))
+    gy = float(np.clip(cmd[2] + vehicle.thrust_misalign[1], -vehicle.gimbal_limit, vehicle.gimbal_limit))
 
     # --- Forces ---
     dir_body = thrust_direction_body(gx, gy)
@@ -85,14 +97,20 @@ def state_derivative(
 
     f_gravity_world = np.array([0.0, 0.0, -vehicle.mass * env.gravity])
 
-    speed = np.linalg.norm(v_world)
-    if speed > 1e-6:
-        drag_mag = 0.5 * env.air_density * vehicle.drag_coeff * vehicle.ref_area * speed * speed
-        f_drag_world = -drag_mag * (v_world / speed)
+    # Drag acts on airspeed = ground velocity - wind. Use the larger side area
+    # for the crosswind component so wind is actually felt at low speed.
+    v_air = v_world - wind
+    air_speed = np.linalg.norm(v_air)
+    if air_speed > 1e-6:
+        area = vehicle.ref_area + (vehicle.side_area - vehicle.ref_area) * (
+            np.linalg.norm(v_air[:2]) / air_speed
+        )
+        drag_mag = 0.5 * env.air_density * vehicle.drag_coeff * area * air_speed * air_speed
+        f_drag_world = -drag_mag * (v_air / air_speed)
     else:
         f_drag_world = np.zeros(3)
 
-    accel = (f_thrust_world + f_gravity_world + f_drag_world) / vehicle.mass
+    accel = (f_thrust_world + f_gravity_world + f_drag_world + external_force) / vehicle.mass
 
     # --- Torque (body frame) ---
     r_engine = np.array([0.0, 0.0, -vehicle.engine_offset])
@@ -118,12 +136,14 @@ def rk4_step(
     dt: float,
     vehicle: Vehicle,
     env: Environment,
+    wind: np.ndarray | None = None,
+    external_force: np.ndarray | None = None,
 ) -> np.ndarray:
-    """One RK4 integration step (command held constant over dt)."""
-    k1 = state_derivative(state, cmd, vehicle, env)
-    k2 = state_derivative(state + 0.5 * dt * k1, cmd, vehicle, env)
-    k3 = state_derivative(state + 0.5 * dt * k2, cmd, vehicle, env)
-    k4 = state_derivative(state + dt * k3, cmd, vehicle, env)
+    """One RK4 integration step (command and disturbances held constant over dt)."""
+    k1 = state_derivative(state, cmd, vehicle, env, wind, external_force)
+    k2 = state_derivative(state + 0.5 * dt * k1, cmd, vehicle, env, wind, external_force)
+    k3 = state_derivative(state + 0.5 * dt * k2, cmd, vehicle, env, wind, external_force)
+    k4 = state_derivative(state + dt * k3, cmd, vehicle, env, wind, external_force)
     new_state = state + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
     new_state[QUAT] = quat.quat_normalize(new_state[QUAT])
     return new_state
