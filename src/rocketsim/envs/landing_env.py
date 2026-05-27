@@ -190,10 +190,10 @@ class LandingEnv(gym.Env):
 
 
 def make_landing_env(difficulty: str = "calm", **kwargs) -> LandingEnv:
-    """Factory: difficulty in {calm, moderate, hard}."""
+    """Factory: difficulty in {calm, moderate, hard, unknown}."""
     from ..scenarios import disturbances as D
 
-    presets = {"calm": D.calm, "moderate": D.moderate, "hard": D.hard}
+    presets = {"calm": D.calm, "moderate": D.moderate, "hard": D.hard, "unknown": D.model_unknown}
     dist, rand = presets[difficulty]()
     scenario = LandingScenario.hard() if difficulty == "hard" else LandingScenario()
     return LandingEnv(scenario=scenario, disturbance=dist, randomization=rand, **kwargs)

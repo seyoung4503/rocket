@@ -60,12 +60,20 @@ class Randomization:
     thrust_scale: tuple[float, float] = (1.0, 1.0)
     misalign_deg: float = 0.0  # max constant thrust/CG misalignment (per axis)
     cg_offset_scale: tuple[float, float] = (1.0, 1.0)  # scales engine_offset
+    inertia_scale: tuple[float, float] = (1.0, 1.0)  # scales the inertia tensor
+    twr_range: tuple[float, float] | None = None  # if set, draw thrust from TWR
+    # (overrides thrust_scale; guarantees a feasible thrust-to-weight while mass
+    # varies widely, so episodes stay solvable)
 
     def sample_vehicle(self, base: Vehicle, rng: np.random.Generator) -> Vehicle:
         v = copy.deepcopy(base)
         v.mass = base.mass * rng.uniform(*self.mass_scale)
-        v.max_thrust = base.max_thrust * rng.uniform(*self.thrust_scale)
+        if self.twr_range is not None:
+            v.max_thrust = v.mass * 9.80665 * rng.uniform(*self.twr_range)
+        else:
+            v.max_thrust = base.max_thrust * rng.uniform(*self.thrust_scale)
         v.engine_offset = base.engine_offset * rng.uniform(*self.cg_offset_scale)
+        v.inertia = base.inertia * rng.uniform(*self.inertia_scale)
         m = np.deg2rad(self.misalign_deg)
         v.thrust_misalign = rng.uniform(-m, m, size=2) if m > 0 else np.zeros(2)
         v.__post_init__()  # refresh inertia_inv and array casts
@@ -114,5 +122,30 @@ def hard() -> tuple[DisturbanceModel, Randomization]:
         thrust_scale=(0.9, 1.1),  # weaker / stronger motor
         misalign_deg=2.5,  # constant torque disturbance
         cg_offset_scale=(0.85, 1.15),
+    )
+    return dist, rand
+
+
+def model_unknown() -> tuple[DisturbanceModel, Randomization]:
+    """The plant changes drastically every episode (mass, thrust, inertia, CG all
+    vary 2-3x); wind is mild so the *model uncertainty* is the dominant challenge.
+
+    PID is given a single fixed nominal model and fixed gains, so it cannot be
+    right for every episode. RL (trained across this range, with memory) can
+    infer the current plant from the state history and adapt — its home turf.
+    """
+    dist = DisturbanceModel(
+        wind_mean=1.0,  # mild — isolate the model-uncertainty effect
+        gust_std=0.5,
+        gust_tau=1.5,
+        force_std=0.5,
+        force_tau=0.9,
+    )
+    rand = Randomization(
+        mass_scale=(0.6, 1.8),  # 3x mass spread -> wrong hover-throttle feedforward
+        twr_range=(1.4, 2.6),  # feasible but varied -> hover throttle unknown
+        misalign_deg=3.0,
+        cg_offset_scale=(0.6, 1.5),
+        inertia_scale=(0.5, 2.0),  # 4x spread -> fixed attitude gains mismatched
     )
     return dist, rand
