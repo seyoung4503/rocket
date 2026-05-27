@@ -63,8 +63,8 @@ def main() -> int:
                 # the policy has moved too far, preventing that collapse. A
                 # slightly lower constant LR adds margin (a global decay would
                 # wrongly zero-out the LR by the final curriculum stage).
-                learning_rate=2.5e-4,
-                target_kl=0.03,
+                learning_rate=3e-4,
+                target_kl=0.06,
                 policy_kwargs=dict(net_arch=[256, 256]),
                 verbose=1,
             )
