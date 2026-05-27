@@ -37,11 +37,11 @@ class LandingEnv(gym.Env):
         randomization: Randomization | None = None,
         control_hz: float = 50.0,
         sim_dt: float = 0.002,
-        gamma: float = 0.99,
+        step_penalty: float = 0.05,
         seed: int | None = None,
     ):
         super().__init__()
-        self.gamma = gamma
+        self.step_penalty = step_penalty
         self.scenario = scenario or LandingScenario()
         if disturbance is None or randomization is None:
             d, r = calm()
@@ -130,9 +130,11 @@ class LandingEnv(gym.Env):
             if done:
                 break
 
-        # potential-based shaping: gamma*Phi(s') - Phi(s), plus terminal reward
+        # Potential-difference shaping (Phi' - Phi): a fixed point gives ZERO
+        # shaping, so hovering can't farm reward. A small step penalty actively
+        # discourages dithering. Terminal reward supplies the landing objective.
         phi = self.scenario.potential(self.state)
-        reward = self.gamma * phi - self._prev_phi
+        reward = (phi - self._prev_phi) - self.step_penalty
         self._prev_phi = phi
         if reason:
             reward += self.scenario.terminal_reward(self.state, reason)
