@@ -92,4 +92,25 @@
 - [ ] Gymnasium 환경(`envs/landing_env.py`)으로 시나리오 래핑 → RL(hard에서 PID 58% 돌파 목표).
 - [ ] PID vs RL 공정 비교(동일 시나리오·외란·랜덤화).
 
+## 2026-05-27 14:23 (KST) — RL 진입: Gymnasium 환경 + PPO 학습 파이프라인
+
+**환경 설치 (Python 3.14, arm64)**
+- gymnasium 1.3.0 / torch 2.12.0 / stable-baselines3 2.8.0 설치 성공. `pip install -e .` (editable, SubprocVecEnv 워커 import용).
+
+**구현한 것**
+- `src/rocketsim/envs/landing_env.py` — `LandingEnv`(Gymnasium). 관측 13차원(pos/vel/**body-z**(자세, 쿼터니언 double-cover 회피)/omega/thrust), 행동 3차원(throttle+gimbal, [-1,1]). 50Hz 제어 + 500Hz 서브스텝(김벌 레이트제한·외란 적용). SB3 `check_env` 통과.
+  - `command_to_action()` 제공 → **PID도 동일 env에서 평가**(공정 비교).
+- `scripts/evaluate.py` — PID 또는 SB3 모델을 동일 env에서 평가(성공률/접지속도).
+- `scripts/train.py` — PPO(MlpPolicy 256x256, 8 env SubprocVecEnv) / SAC 옵션, 체크포인트(100k마다).
+
+**보상 설계 (중요)**
+- 1차 시도(per-step 음수 페널티 + sparse +100): **die-fast 함정** — 빨리 추락해 페널티 누적을 끝내는 게 이득이 됨. ep_rew -130대 정체(150k 후 -92로 겨우 상승). 폐기.
+- 교체: **포텐셜 기반 shaping** `r = γΦ(s')−Φ(s) + terminal`. `Φ=-(1.0·dist+0.4·speed+2.0·tilt)` → 패드로 다가가고 감속·직립할 때만 보상(hover-farming/die-fast 모두 차단). terminal: soft +100, hard −(10~60), crash −100, timeout −20.
+
+**기준선 (동일 env @ 50Hz)**
+- **PID hard = 60%** (29~30/50). 500Hz의 58%와 일치 → RL이 넘어야 할 목표.
+
+**진행 중**
+- PPO hard 3M 스텝 학습 백그라운드 실행. 목표: hard에서 PID 60% 돌파. 결과는 다음 항목에 기록 예정.
+
 <!-- 새 항목은 이 줄 위에 추가 -->

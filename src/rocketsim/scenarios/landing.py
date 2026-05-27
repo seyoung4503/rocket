@@ -120,31 +120,42 @@ class LandingScenario:
             and np.rad2deg(quat.tilt_angle(state[dyn.QUAT])) <= self.max_touchdown_tilt_deg
         )
 
-    # --- RL reward (shaped) --------------------------------------------------
+    # --- RL reward: potential-based shaping + sparse terminal ----------------
+    #
+    # Per-step reward is the change in a potential Phi (policy-invariant
+    # shaping): the agent is rewarded only for *getting closer* to a centered,
+    # slow, upright state over the pad — never for merely staying alive (which
+    # would invite hover-farming) nor for ending the episode early (which a
+    # plain negative penalty would invite). A large terminal bonus/penalty
+    # supplies the actual landing objective.
 
-    def reward(self, state: np.ndarray, cmd: np.ndarray, reason: str) -> float:
-        """Dense shaping + sparse terminal bonus. Used by the RL env later."""
+    w_dist: float = 1.0  # 3D distance to pad
+    w_speed: float = 0.4  # speed
+    w_tilt: float = 2.0  # tilt (rad)
+
+    def potential(self, state: np.ndarray) -> float:
         pos, vel = state[dyn.POS], state[dyn.VEL]
+        dist = float(np.linalg.norm(pos))  # includes altitude -> rewards descent
+        speed = float(np.linalg.norm(vel))
         tilt = quat.tilt_angle(state[dyn.QUAT])
-        horiz = np.linalg.norm(pos[:2])
+        return -(self.w_dist * dist + self.w_speed * speed + self.w_tilt * tilt)
 
-        # per-step shaping: stay near the pad axis, upright, descend gently
-        r = 0.0
-        r -= 0.30 * horiz  # off-axis penalty
-        r -= 0.50 * tilt  # tilt penalty
-        r -= 0.05 * np.linalg.norm(vel[:2])  # lateral velocity
-        r -= 0.02 * cmd[0]  # mild energy penalty
-        r -= 0.02  # time penalty (encourage finishing)
-
+    def terminal_reward(self, state: np.ndarray, reason: str) -> float:
         if reason == "touchdown":
             if self.is_soft_landing(state):
-                r += 100.0
-                r -= 10.0 * max(0.0, -vel[2])  # softer is better
-            else:
-                r -= 30.0  # hard landing
-        elif reason in ("crash_tilt", "out_of_bounds", "too_high"):
-            r -= 100.0
-        return float(r)
+                return 100.0
+            vel, pos = state[dyn.VEL], state[dyn.POS]
+            # hard but on the ground: penalty grows with how badly it missed
+            pen = 10.0
+            pen += 15.0 * max(0.0, -vel[2] - self.max_touchdown_vspeed)
+            pen += 10.0 * max(0.0, np.linalg.norm(vel[:2]) - self.max_touchdown_hspeed)
+            pen += 10.0 * max(0.0, np.linalg.norm(pos[:2]) - self.max_touchdown_offset)
+            return -float(min(pen, 60.0))
+        if reason in ("crash_tilt", "out_of_bounds", "too_high"):
+            return -100.0
+        if reason == "timeout":
+            return -20.0  # mild: discourage stalling without farming a crash
+        return 0.0
 
     # --- evaluation ----------------------------------------------------------
 

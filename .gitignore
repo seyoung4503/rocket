@@ -4,3 +4,6 @@ __pycache__/
 out/
 *.egg-info/
 .pytest_cache/
+models/
+runs/
+*.zip
