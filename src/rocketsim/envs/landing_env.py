@@ -194,6 +194,10 @@ def make_landing_env(difficulty: str = "calm", **kwargs) -> LandingEnv:
     from ..scenarios import disturbances as D
 
     presets = {"calm": D.calm, "moderate": D.moderate, "hard": D.hard, "unknown": D.model_unknown}
-    dist, rand = presets[difficulty]()
-    scenario = LandingScenario.hard() if difficulty == "hard" else LandingScenario()
+    if difficulty == "recovery":
+        dist, rand = D.moderate()  # mild wind/plant — isolate the attitude recovery
+        scenario = LandingScenario.recovery()
+    else:
+        dist, rand = presets[difficulty]()
+        scenario = LandingScenario.hard() if difficulty == "hard" else LandingScenario()
     return LandingEnv(scenario=scenario, disturbance=dist, randomization=rand, **kwargs)

@@ -42,6 +42,7 @@ class LandingScenario:
     start_descent: tuple[float, float] = (-1.0, -3.0)  # m/s (negative = down)
     start_offset: float = 1.5  # m, max horizontal offset
     start_tilt_deg: float = 8.0  # deg, max initial tilt
+    start_tilt_min: float = 0.0  # deg, min initial tilt (>0 forces a tilted start)
     start_lateral_vel: float = 0.5  # m/s, max horizontal velocity
 
     # --- success thresholds at touchdown ---
@@ -71,6 +72,27 @@ class LandingScenario:
             timeout=35.0,  # starts higher + may hover to re-center before commit
         )
 
+    @classmethod
+    def recovery(cls) -> "LandingScenario":
+        """Aerobatic recovery: start strongly tilted (70-140 deg, i.e. sideways
+        to inverted) and high, recover to upright and land. PID's small-angle
+        gimbal mapping + limited tilt budget break here; a nonlinear recovery
+        policy (RL) can in principle do better. Plant/wind are mild to isolate
+        the attitude-recovery challenge."""
+        return cls(
+            start_alt=(12.0, 16.0),  # room to recover before touchdown
+            start_descent=(0.0, -1.0),
+            start_offset=1.5,
+            start_tilt_min=70.0,
+            start_tilt_deg=140.0,
+            start_lateral_vel=0.5,
+            timeout=35.0,
+            # the vehicle starts past the normal tip-over limit and must pass
+            # through large tilts while recovering, so disable the in-flight
+            # tilt-crash; success is still judged by an upright, soft touchdown.
+            crash_tilt_deg=200.0,
+        )
+
     def sample_initial_state(
         self, rng: np.random.Generator | None = None, scale: float = 1.0
     ) -> np.ndarray:
@@ -88,8 +110,8 @@ class LandingScenario:
         px, py = r * np.cos(ang), r * np.sin(ang)
         vxy = rng.uniform(-self.start_lateral_vel, self.start_lateral_vel, size=2) * scale
 
-        # small random tilt
-        tilt = np.deg2rad(rng.uniform(0, self.start_tilt_deg) * scale)
+        # initial tilt (start_tilt_min>0 forces a strongly tilted/inverted start)
+        tilt = np.deg2rad(rng.uniform(self.start_tilt_min, self.start_tilt_deg) * scale)
         axis_ang = rng.uniform(0, 2 * np.pi)
         half = tilt / 2
         q = np.array(
