@@ -166,7 +166,7 @@ class LandingScenario:
             # vertical speed (vspeed 1.12 > 1.0 limit): raise vspeed & offset
             # weights so the wind-precision gain converts into actual successes,
             # not a traded-away vertical landing. (target_kl keeps this stable.)
-            cost = 40.0 * vspeed + 35.0 * hspeed + 40.0 * offset + 65.0 * tilt
+            cost = 40.0 * vspeed + 35.0 * hspeed + 48.0 * offset + 70.0 * tilt
             r = 100.0 - cost
             if self.is_soft_landing(state):
                 r += 60.0  # bonus for clearing EVERY threshold -> precision pays
