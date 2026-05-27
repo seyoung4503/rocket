@@ -58,4 +58,10 @@
 - [ ] Gymnasium 환경(`envs/landing_env.py`)으로 시나리오 래핑 → RL 학습.
 - [ ] PID vs RL 공정 비교표(성공률·접지속도·에너지·강건성).
 
+## 2026-05-27 13:19 (KST) — GitHub 저장소 연동
+
+- `git init` 후 원격 `https://github.com/seyoung4503/rocket.git`(기존 README만 있던 빈 저장소)에 연결.
+- 원격 Initial commit 위에 로컬 작업을 얹어 히스토리 선형 유지. 프로젝트 README로 대체.
+- `main` 브랜치 푸시 완료(커밋 `08aabb6`). `.venv/`, `out/`, `__pycache__/`는 `.gitignore`로 제외.
+
 <!-- 새 항목은 이 줄 위에 추가 -->
