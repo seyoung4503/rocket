@@ -162,14 +162,15 @@ class LandingScenario:
             hspeed = float(np.linalg.norm(vel[:2]))
             offset = float(np.linalg.norm(pos[:2]))
             tilt = quat.tilt_angle(state[dyn.QUAT])
-            # Moderate extra weight on offset & lateral speed (the dominant
-            # failure modes) — enough to push for precision, but kept near the
-            # reward scale that trains stably (too-steep costs broke learning).
-            cost = 25.0 * vspeed + 30.0 * hspeed + 30.0 * offset + 60.0 * tilt
+            # Rebalanced after the memory run cleared offset/hspeed but blew
+            # vertical speed (vspeed 1.12 > 1.0 limit): raise vspeed & offset
+            # weights so the wind-precision gain converts into actual successes,
+            # not a traded-away vertical landing. (target_kl keeps this stable.)
+            cost = 40.0 * vspeed + 35.0 * hspeed + 40.0 * offset + 65.0 * tilt
             r = 100.0 - cost
             if self.is_soft_landing(state):
-                r += 50.0  # solid bonus for clearing EVERY threshold -> precision pays
-            return float(np.clip(r, -40.0, 140.0))
+                r += 60.0  # bonus for clearing EVERY threshold -> precision pays
+            return float(np.clip(r, -40.0, 150.0))
         if reason in ("crash_tilt", "out_of_bounds", "too_high"):
             return -100.0
         if reason == "timeout":
