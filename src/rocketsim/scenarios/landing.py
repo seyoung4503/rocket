@@ -71,17 +71,25 @@ class LandingScenario:
             timeout=35.0,  # starts higher + may hover to re-center before commit
         )
 
-    def sample_initial_state(self, rng: np.random.Generator | None = None) -> np.ndarray:
+    def sample_initial_state(
+        self, rng: np.random.Generator | None = None, scale: float = 1.0
+    ) -> np.ndarray:
+        """Sample a start state. ``scale`` in (0, 1] eases the initial condition
+        for a reverse curriculum: scale->0 starts low/slow/upright near the pad
+        (soft touchdown is trivial to discover); scale=1 is the full task."""
         rng = rng or np.random.default_rng()
-        alt = rng.uniform(*self.start_alt)
-        vz = rng.uniform(min(self.start_descent), max(self.start_descent))
+        scale = float(np.clip(scale, 0.02, 1.0))
+        min_alt = 1.0  # never start on the ground, even at scale~0
+        full_alt = rng.uniform(*self.start_alt)
+        alt = min_alt + (full_alt - min_alt) * scale
+        vz = rng.uniform(min(self.start_descent), max(self.start_descent)) * scale
         ang = rng.uniform(0, 2 * np.pi)
-        r = rng.uniform(0, self.start_offset)
+        r = rng.uniform(0, self.start_offset) * scale
         px, py = r * np.cos(ang), r * np.sin(ang)
-        vxy = rng.uniform(-self.start_lateral_vel, self.start_lateral_vel, size=2)
+        vxy = rng.uniform(-self.start_lateral_vel, self.start_lateral_vel, size=2) * scale
 
         # small random tilt
-        tilt = np.deg2rad(rng.uniform(0, self.start_tilt_deg))
+        tilt = np.deg2rad(rng.uniform(0, self.start_tilt_deg) * scale)
         axis_ang = rng.uniform(0, 2 * np.pi)
         half = tilt / 2
         q = np.array(

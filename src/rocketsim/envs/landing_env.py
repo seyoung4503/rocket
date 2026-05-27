@@ -38,10 +38,12 @@ class LandingEnv(gym.Env):
         control_hz: float = 50.0,
         sim_dt: float = 0.002,
         step_penalty: float = 0.05,
+        init_scale: float = 1.0,
         seed: int | None = None,
     ):
         super().__init__()
         self.step_penalty = step_penalty
+        self.init_scale = init_scale
         self.scenario = scenario or LandingScenario()
         if disturbance is None or randomization is None:
             d, r = calm()
@@ -104,7 +106,7 @@ class LandingEnv(gym.Env):
             self._rng = np.random.default_rng(seed)
         self.vehicle = self.randomization.sample_vehicle(self.base, self._rng)
         self.disturbance.reset(self._rng)
-        self.state = self.scenario.sample_initial_state(self._rng)
+        self.state = self.scenario.sample_initial_state(self._rng, scale=self.init_scale)
         self.t = 0.0
         self._prev_gimbal = np.zeros(2)
         self._prev_phi = self.scenario.potential(self.state)

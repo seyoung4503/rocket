@@ -25,6 +25,7 @@ def main() -> int:
     ap.add_argument("--init-from", default=None, help="warm-start from a saved model (curriculum)")
     ap.add_argument("--ent-coef", type=float, default=0.005, help="PPO entropy coef (exploration)")
     ap.add_argument("--step-penalty", type=float, default=0.08, help="per-step penalty (anti-hover)")
+    ap.add_argument("--init-scale", type=float, default=1.0, help="reverse curriculum: ease of start (0..1)")
     args = ap.parse_args()
 
     from functools import partial
@@ -37,7 +38,9 @@ def main() -> int:
     from rocketsim.envs import make_landing_env
 
     # picklable for SubprocVecEnv workers (spawn) — make_landing_env is importable
-    env_fn = partial(make_landing_env, args.difficulty, step_penalty=args.step_penalty)
+    env_fn = partial(
+        make_landing_env, args.difficulty, step_penalty=args.step_penalty, init_scale=args.init_scale
+    )
 
     out = args.out or f"models/{args.algo}_{args.difficulty}.zip"
     os.makedirs("models", exist_ok=True)
