@@ -60,9 +60,13 @@ def main() -> int:
     ap.add_argument("--policy", default="pid", help="'pid' or path to an SB3 .zip model")
     ap.add_argument("--difficulty", default="hard", choices=["calm", "moderate", "hard"])
     ap.add_argument("--episodes", type=int, default=100)
+    ap.add_argument("--residual", action="store_true", help="evaluate a residual-RL model (PID + correction)")
+    ap.add_argument("--residual-scale", type=float, default=0.4)
     args = ap.parse_args()
 
-    env = make_landing_env(args.difficulty)
+    env = make_landing_env(
+        args.difficulty, residual=args.residual, residual_scale=args.residual_scale
+    )
 
     if args.policy == "pid":
         label = "PID"

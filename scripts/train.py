@@ -26,6 +26,8 @@ def main() -> int:
     ap.add_argument("--ent-coef", type=float, default=0.005, help="PPO entropy coef (exploration)")
     ap.add_argument("--step-penalty", type=float, default=0.08, help="per-step penalty (anti-hover)")
     ap.add_argument("--init-scale", type=float, default=1.0, help="reverse curriculum: ease of start (0..1)")
+    ap.add_argument("--residual", action="store_true", help="residual RL: learn a correction on top of PID")
+    ap.add_argument("--residual-scale", type=float, default=0.4, help="max residual correction magnitude")
     args = ap.parse_args()
 
     from functools import partial
@@ -39,7 +41,12 @@ def main() -> int:
 
     # picklable for SubprocVecEnv workers (spawn) — make_landing_env is importable
     env_fn = partial(
-        make_landing_env, args.difficulty, step_penalty=args.step_penalty, init_scale=args.init_scale
+        make_landing_env,
+        args.difficulty,
+        step_penalty=args.step_penalty,
+        init_scale=args.init_scale,
+        residual=args.residual,
+        residual_scale=args.residual_scale,
     )
 
     out = args.out or f"models/{args.algo}_{args.difficulty}.zip"
@@ -61,6 +68,7 @@ def main() -> int:
                 gamma=0.99,
                 ent_coef=args.ent_coef,
                 learning_rate=3e-4,
+                target_kl=0.06,  # trust region: avoid catastrophic policy collapse
                 policy_kwargs=dict(net_arch=[256, 256]),
                 verbose=1,
             )

@@ -39,11 +39,19 @@ class LandingEnv(gym.Env):
         sim_dt: float = 0.002,
         step_penalty: float = 0.05,
         init_scale: float = 1.0,
+        residual: bool = False,
+        residual_scale: float = 0.4,
         seed: int | None = None,
     ):
         super().__init__()
         self.step_penalty = step_penalty
         self.init_scale = init_scale
+        # Residual RL: the PID baseline produces the action; the policy only adds
+        # a bounded correction (residual_scale * action). The policy thus starts
+        # from PID's behavior and learns just the gust-precision it misses.
+        self.residual = residual
+        self.residual_scale = residual_scale
+        self._base_ctrl = None
         self.scenario = scenario or LandingScenario()
         if disturbance is None or randomization is None:
             d, r = calm()
@@ -110,9 +118,17 @@ class LandingEnv(gym.Env):
         self.t = 0.0
         self._prev_gimbal = np.zeros(2)
         self._prev_phi = self.scenario.potential(self.state)
+        if self.residual:
+            from ..controllers import LandingPID
+
+            self._base_ctrl = LandingPID(self.base, self.world)  # fresh per episode
         return self._obs(), {}
 
     def step(self, action: np.ndarray):
+        if self.residual:
+            # base PID action for the current state + bounded policy correction
+            base_a = self.command_to_action(self._base_ctrl(self.t, self.state))
+            action = np.clip(base_a + self.residual_scale * np.asarray(action), -1.0, 1.0)
         cmd = self.action_to_command(action)
         target_gimbal = np.array([cmd.gimbal_x, cmd.gimbal_y])
         max_delta = self.vehicle.gimbal_rate_limit * self.sim_dt
