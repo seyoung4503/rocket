@@ -57,7 +57,14 @@ def main() -> int:
                 gae_lambda=0.95,
                 gamma=0.99,
                 ent_coef=ent,
-                learning_rate=3e-4,
+                # PPO was finding a good policy then destroying it with an
+                # over-large update (ep_rew climbed to +4 then collapsed to
+                # -157). target_kl is a trust region: it stops an update once
+                # the policy has moved too far, preventing that collapse. A
+                # slightly lower constant LR adds margin (a global decay would
+                # wrongly zero-out the LR by the final curriculum stage).
+                learning_rate=2.5e-4,
+                target_kl=0.03,
                 policy_kwargs=dict(net_arch=[256, 256]),
                 verbose=1,
             )
