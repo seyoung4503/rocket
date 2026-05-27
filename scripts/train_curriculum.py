@@ -28,6 +28,7 @@ STAGES = [
 ]
 N_ENVS = 8
 STEP_PENALTY = 0.08
+N_STACK = 4  # frame stacking ("memory"): policy sees the last N_STACK observations
 
 
 def main() -> int:
@@ -41,7 +42,11 @@ def main() -> int:
 
     def venv_for(difficulty, init_scale):
         fn = partial(
-            make_landing_env, difficulty, step_penalty=STEP_PENALTY, init_scale=init_scale
+            make_landing_env,
+            difficulty,
+            step_penalty=STEP_PENALTY,
+            init_scale=init_scale,
+            n_stack=N_STACK,
         )
         return make_vec_env(fn, n_envs=N_ENVS, vec_env_cls=SubprocVecEnv)
 
@@ -79,8 +84,9 @@ def main() -> int:
         print(f"STAGE {i+1} saved {out}", flush=True)
         venv.close()
 
-    model.save("models/ppo_hard.zip")
-    print("saved models/ppo_hard.zip", flush=True)
+    final = "models/ppo_mem_hard.zip" if N_STACK > 1 else "models/ppo_hard.zip"
+    model.save(final)
+    print(f"saved {final}", flush=True)
     return 0
 
 

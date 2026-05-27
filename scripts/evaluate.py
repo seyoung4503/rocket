@@ -62,10 +62,14 @@ def main() -> int:
     ap.add_argument("--episodes", type=int, default=100)
     ap.add_argument("--residual", action="store_true", help="evaluate a residual-RL model (PID + correction)")
     ap.add_argument("--residual-scale", type=float, default=0.4)
+    ap.add_argument("--n-stack", type=int, default=1, help="frame stack size (must match training)")
     args = ap.parse_args()
 
     env = make_landing_env(
-        args.difficulty, residual=args.residual, residual_scale=args.residual_scale
+        args.difficulty,
+        residual=args.residual,
+        residual_scale=args.residual_scale,
+        n_stack=args.n_stack,
     )
 
     if args.policy == "pid":

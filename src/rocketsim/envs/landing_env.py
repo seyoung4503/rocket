@@ -16,6 +16,8 @@ applying gimbal rate limits and disturbances per substep (matching the PID sim).
 
 from __future__ import annotations
 
+from collections import deque
+
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
@@ -41,6 +43,7 @@ class LandingEnv(gym.Env):
         init_scale: float = 1.0,
         residual: bool = False,
         residual_scale: float = 0.4,
+        n_stack: int = 1,
         seed: int | None = None,
     ):
         super().__init__()
@@ -66,8 +69,15 @@ class LandingEnv(gym.Env):
         self.sim_dt = sim_dt
         self.n_sub = max(1, int(round(self.control_dt / self.sim_dt)))
 
+        # Frame stacking ("memory"): the policy sees the last n_stack raw obs,
+        # so it can infer the unmeasured wind/gust from how the state evolves
+        # (acceleration vs commanded thrust) and pre-compensate — something a
+        # memoryless policy (and PID's slow integral) can only do weakly.
+        self.n_stack = max(1, int(n_stack))
+        self._frames: deque | None = None
+
         self.action_space = spaces.Box(-1.0, 1.0, shape=(3,), dtype=np.float32)
-        high = np.full(13, np.inf, dtype=np.float32)
+        high = np.full(13 * self.n_stack, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(-high, high, dtype=np.float32)
 
         self._rng = np.random.default_rng(seed)
@@ -78,7 +88,7 @@ class LandingEnv(gym.Env):
 
     # --- helpers ------------------------------------------------------------
 
-    def _obs(self) -> np.ndarray:
+    def _raw_obs(self) -> np.ndarray:
         s = self.state
         from .. import quaternion as quat
 
@@ -92,6 +102,20 @@ class LandingEnv(gym.Env):
                 [s[dyn.THRUST] / self.base.max_thrust],
             ]
         ).astype(np.float32)
+
+    def _obs(self) -> np.ndarray:
+        """Push the current raw obs and return the stacked (memory) observation."""
+        raw = self._raw_obs()
+        if self._frames is None or self.n_stack == 1:
+            self._frames = deque([raw] * self.n_stack, maxlen=self.n_stack)
+        else:
+            self._frames.append(raw)
+        return np.concatenate(list(self._frames)).astype(np.float32)
+
+    def _reset_frames(self) -> np.ndarray:
+        raw = self._raw_obs()
+        self._frames = deque([raw] * self.n_stack, maxlen=self.n_stack)
+        return np.concatenate(list(self._frames)).astype(np.float32)
 
     def action_to_command(self, action: np.ndarray) -> Command:
         a = np.clip(action, -1.0, 1.0)
@@ -122,7 +146,7 @@ class LandingEnv(gym.Env):
             from ..controllers import LandingPID
 
             self._base_ctrl = LandingPID(self.base, self.world)  # fresh per episode
-        return self._obs(), {}
+        return self._reset_frames(), {}
 
     def step(self, action: np.ndarray):
         if self.residual:
