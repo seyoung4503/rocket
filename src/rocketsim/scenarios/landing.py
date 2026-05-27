@@ -137,16 +137,18 @@ class LandingScenario:
     # plain negative penalty would invite). A large terminal bonus/penalty
     # supplies the actual landing objective.
 
-    w_dist: float = 1.0  # 3D distance to pad
+    w_alt: float = 1.0  # altitude (rewards descent)
+    w_horiz: float = 1.8  # horizontal offset (rewards centering over the pad)
     w_speed: float = 0.4  # speed
     w_tilt: float = 2.0  # tilt (rad)
 
     def potential(self, state: np.ndarray) -> float:
         pos, vel = state[dyn.POS], state[dyn.VEL]
-        dist = float(np.linalg.norm(pos))  # includes altitude -> rewards descent
+        alt = abs(float(pos[2]))
+        horiz = float(np.linalg.norm(pos[:2]))  # weighted higher -> stay centered
         speed = float(np.linalg.norm(vel))
         tilt = quat.tilt_angle(state[dyn.QUAT])
-        return -(self.w_dist * dist + self.w_speed * speed + self.w_tilt * tilt)
+        return -(self.w_alt * alt + self.w_horiz * horiz + self.w_speed * speed + self.w_tilt * tilt)
 
     def terminal_reward(self, state: np.ndarray, reason: str) -> float:
         if reason == "touchdown":
@@ -160,11 +162,13 @@ class LandingScenario:
             hspeed = float(np.linalg.norm(vel[:2]))
             offset = float(np.linalg.norm(pos[:2]))
             tilt = quat.tilt_angle(state[dyn.QUAT])
-            cost = 25.0 * vspeed + 20.0 * hspeed + 20.0 * offset + 60.0 * tilt
+            # Heavy weight on offset & lateral speed: these were the dominant
+            # failure modes (RL landed gently but ~0.9 m off-pad with drift).
+            cost = 25.0 * vspeed + 55.0 * hspeed + 55.0 * offset + 70.0 * tilt
             r = 100.0 - cost
             if self.is_soft_landing(state):
-                r += 30.0  # extra bonus for clearing every threshold
-            return float(np.clip(r, -40.0, 130.0))
+                r += 80.0  # large bonus for clearing EVERY threshold -> precision pays
+            return float(np.clip(r, -40.0, 180.0))
         if reason in ("crash_tilt", "out_of_bounds", "too_high"):
             return -100.0
         if reason == "timeout":
