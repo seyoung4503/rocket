@@ -83,6 +83,171 @@ u_final = safety_filter(u_model_based + u_rl_residual)
 
 ## 단계
 
+### 2026-05-28 다음 구현 작업 — Navigation-first GNC 정리
+
+MPC 실험 결론:
+
+- 단순 3D point-mass MPC는 PID보다 약했다.
+- MPC를 waypoint/guidance로 제한하고 기존 PID가 추종하면 PID 안정성은 유지된다.
+- 다음 병목은 MPC 튜닝이 아니라 **상태추정/센서/terminal mode 계층 부재**다.
+
+따라서 다음 구현 순서는 아래처럼 고정한다.
+
+1. **Sensor model 추가**
+   - 파일 후보: `src/rocketsim/navigation/sensors.py`
+   - IMU gyro/accel noise
+   - attitude noise
+   - altitude/range noise
+   - position/velocity measurement noise
+   - bias/drift는 2차 단계로 둔다.
+
+2. **Simple estimator 추가**
+   - 파일 후보: `src/rocketsim/navigation/estimator.py`
+   - 시작은 EKF가 아니라 low-pass/complementary filter로 한다.
+   - 입력: noisy measurement
+   - 출력: controller가 사용할 estimated state
+   - 목적: PID/MPC/RL이 모두 같은 추정 상태를 보게 만드는 것
+
+3. **Environment control-state 분리**
+   - 현재 true state, noisy measured state, estimated state의 역할을 분리한다.
+   - controller 입력은 기본적으로 estimated state가 되도록 한다.
+   - 성공 판정은 true state로 유지한다.
+
+4. **평가 스크립트 추가**
+   - 파일 후보: `scripts/evaluate_navigation.py`
+   - 비교 대상:
+     - PID on true/noisy state
+     - PID on estimated state
+     - MPC waypoint + PID on estimated state
+   - 난이도:
+     - `calm`
+     - `moderate`
+     - `noisy`
+     - `hard`
+
+5. **Guidance/terminal mode 분리**
+   - 파일 후보: `src/rocketsim/guidance/landing.py`
+   - `LandingPID` 안에 섞여 있는 landing gate를 별도 guidance state machine으로 분리한다.
+   - 모드:
+     - `approach`
+     - `settle`
+     - `flare`
+     - `commit`
+     - `touchdown/abort`
+
+6. **MPC 재평가**
+   - estimator + guidance state machine 위에서 다시 비교한다.
+   - 비교 대상:
+     - PID baseline
+     - Cvxpy waypoint guidance + PID tracking
+     - Cvxpy guidance + tracking feedback
+   - 목표는 당장 PID를 이기는 것이 아니라, 같은 GNC 계층 위에서 공정 비교하는 것이다.
+
+7. **RL residual은 마지막에 추가**
+   - 기본 구조가 안정화된 뒤에만 진행한다.
+   - 제한:
+     - throttle residual: 작은 범위
+     - gimbal residual: 작은 범위
+   - RL의 목표는 direct control이 아니라 모델오차/노이즈/외란 보정이다.
+
+성공 기준:
+
+- `calm`, `moderate`에서 estimated-state PID가 true-state PID와 거의 같은 성공률을 유지한다.
+- `noisy`에서 estimated-state PID가 raw noisy PID보다 개선된다.
+- MPC 계열은 같은 estimated state와 같은 terminal mode를 사용해 평가된다.
+- 모든 결과는 `docs/mpc_experiments.md` 또는 별도 `docs/navigation_experiments.md`에 기록한다.
+
+### 2026-05-28 추가 실험 결과 — point-mass MPC 한계 확인
+
+질문:
+
+> 현재 문제가 MPC가 점질량으로 계산해서 로켓이 실패하는 것인가?
+
+실험 결론:
+
+- **맞다. 큰 원인 중 하나다.**
+- 현재 시뮬레이터는 점질량이 아니라 6-DOF rigid body다.
+  - quaternion attitude
+  - 관성행렬
+  - 엔진 오프셋
+  - TVC gimbal
+  - gimbal rate limit
+  - thrust spool-up lag
+  - drag/wind/external force
+  - episode별 mass/thrust/inertia/misalignment randomization
+- 반면 convex MPC는 position/velocity만 보는 point-mass 모델이다.
+- `scripts/diagnose_mpc_model_mismatch.py`로 점질량 계획을 6-DOF 시뮬레이터에서 no-wind rollout 해보니, 계획은 4-5 m 고도에 남아 있어야 하는데 실제 6-DOF 차량은 지면을 통과했다.
+- gimbal saturation이 87-94%로 나타났다. 즉 point-mass solver가 요구하는 lateral acceleration이 실제 짐벌 로켓으로는 그 시간 안에 추종 불가능하다.
+- oracle plant model, 즉 episode별 실제 mass/thrust/inertia를 알려줘도 이 mismatch가 사라지지 않았다. 문제는 단순 파라미터 오차가 아니라 모델 구조 차이다.
+
+추가 구현:
+
+- `scripts/diagnose_mpc_model_mismatch.py`
+  - point-mass convex MPC 계획과 6-DOF rollout mismatch를 측정한다.
+  - 결과 저장: `docs/mpc_model_mismatch.md`
+- `LandingFullDynamicsMPC`
+  - `dyn.rk4_step` 기반 6-DOF sampled nonlinear MPC
+  - PID 명령 주변의 residual 후보를 full dynamics로 rollout한다.
+  - retune 후에는 PID safety-filter 형태로만 작은 보정을 허용한다.
+  - 결과 저장: `docs/full_dynamics_mpc_experiments.md`
+
+현재 결론:
+
+- convex point-mass MPC는 **outer guidance**로는 유지할 수 있다.
+- 하지만 직접 착륙 authority를 주면 현재 6-DOF 로켓이 추종하지 못한다.
+- 실제 SpaceX식 구조에 더 가까운 다음 단계는:
+  1. point-mass convex guidance
+  2. attitude/actuator feasibility check
+  3. full-dynamics tracking controller
+  4. safety filter
+  5. estimator 기반 상태 입력
+- full 6-DOF sampled MPC는 연구/진단용으로는 유용하지만, 현재 Python 구현은 너무 느려서 50 Hz onboard controller 후보가 아니다.
+
+### 2026-05-28 구조 정리 — Shared Guidance + MPC+PID
+
+이번 정리의 목적:
+
+- PID 안에 있던 landing gate를 분리한다.
+- PID와 MPC가 같은 착륙 판단을 공유하게 만든다.
+- MPC는 단독 제어기가 아니라 waypoint/guidance 제안자로 쓴다.
+- PID는 최종 throttle/gimbal tracking을 계속 담당한다.
+
+구현:
+
+- `src/rocketsim/guidance/landing.py`
+  - `LandingGuidance`
+  - `LandingGuidanceConfig`
+  - `LandingGuidanceOutput`
+  - mode: `approach`, `settle`, `flare`, `commit`
+- `LandingPID`
+  - 기존 landing gate 로직을 제거하고 `LandingGuidance` target만 추종하도록 변경
+- `LandingCvxpyWaypointPID`
+  - 기존 ad hoc landing gate 대신 shared `LandingGuidance` 사용
+- `LandingFeasibleWaypointMPC`
+  - point-mass MPC가 제안한 XY waypoint를 attitude/actuator feasibility envelope 안으로 projection
+  - PID가 projected target을 추종
+- `scripts/evaluate_navigation.py`
+  - `feasible` controller 추가
+
+실험:
+
+`docs/feasible_waypoint_experiments.md`, n=100, estimated state, nominal plant model
+
+| difficulty | PID | waypoint MPC+PID | feasible MPC+PID |
+|---|---:|---:|---:|
+| noisy | 85/100 | 75/100 | 79/100 |
+| hard | 34/100 | 33/100 | 34/100 |
+
+해석:
+
+- **MPC+PID는 사용한다.**
+- 다만 MPC가 throttle/gimbal을 직접 제어하는 방식이 아니라, PID가 따라갈 waypoint를 제안하는 방식이다.
+- n=10에서는 hard 개선처럼 보였지만, n=100에서는 통계적으로 유지되지 않았다.
+- feasible 버전은 raw waypoint보다 noisy 안정성이 낫지만 PID보다 좋지는 않다.
+- hard에서는 PID와 거의 동률이다.
+- 남은 문제는 vertical speed가 아니라 terminal hspeed/offset/tilt다.
+- 다음 개선은 단순 waypoint clipping이 아니라 terminal guidance/trajectory timing 자체를 바꿔야 한다.
+
 ### Phase 0 — 현재 코드 정리: 착륙 시뮬레이션 기준선
 
 완료/진행 중:
