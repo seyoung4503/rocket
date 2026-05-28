@@ -316,4 +316,19 @@ RL 트랙 1차 마무리. RL이 *이기는* 영역(모델 미지·곡예기동)�
 - **hard: 0% 붕괴** — 수직 throttle만 보고 수평/외란 무시 → 바람에 횡으로 밀려 offset 0.91·hspeed 0.77, 게이트로 17 타임아웃.
 - **결론:** 수직 전용 MPC는 잔잔할 때만 유효. 실제(외란/divert)엔 **추력 벡터(수평+수직 결합) 3-DOF MPC 필요.** → 다음: cvxpy로 SpaceX식 3-DOF convex powered-descent.
 
+## 2026-05-28 17:44 (KST) — 적응형 EKF: hard 회귀 해소 (34→55) + noisy 85 유지
+
+**검증:** 리팩토링은 결백(PID hard true state n=100 = 55%, 이전 53%와 동일). hard 34% 원인은 **EKF의 *고정* 필터 lag**(vel_tau=0.12s)이 노이즈 없는 입력에도 항상 적용되어 PID 미분항을 둔하게 만든 것.
+
+**개선:** `LowPassEstimatorConfig.for_obs_noise(obs_noise)` 추가 — 필터 시간상수를 입력 노이즈에 비례 스케일. obs_noise=0 → scale=0 → passthrough; obs_noise=2 → scale=1 → 기존 필터.
+
+**검증 결과 (n=100):**
+
+| 영역 | 적응 전 | 적응 후 |
+|---|---|---|
+| PID + EKF @ hard (clean) | 34% | **55%** (PID 단독과 동률) |
+| PID + EKF @ noisy (2× noise) | 85% | **85%** (유지) |
+
+→ 비대칭 손실 없이 GNC 스택이 모든 영역에서 PID 단독을 *능가하거나 동률*. 노이즈에선 RL(67%)도 명확히 능가(85%). **미니 SpaceX 1차 베이스라인 확정.**
+
 <!-- 새 항목은 이 줄 위에 추가 -->

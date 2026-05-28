@@ -37,6 +37,7 @@ from rocketsim.controllers import (  # noqa: E402
 )
 from rocketsim.envs import make_landing_env  # noqa: E402
 from rocketsim.navigation import LowPassStateEstimator  # noqa: E402
+from rocketsim.navigation.estimator import LowPassEstimatorConfig  # noqa: E402
 
 
 CONTROLLERS = ("pid", "vertical", "cvxpy", "guidance", "waypoint", "feasible", "full")
@@ -85,7 +86,11 @@ def eval_mode(difficulty: str, controller_name: str, mode: str, n: int, plant_mo
     for ep in range(n):
         env.reset(seed=ep)
         ctrl = make_controller(controller_name, env, plant_model)
-        estimator = LowPassStateEstimator()
+        # Adaptive estimator: filter strength scales with input noise so
+        # clean inputs (hard, obs_noise=0) aren't unnecessarily lagged.
+        estimator = LowPassStateEstimator(
+            LowPassEstimatorConfig.for_obs_noise(getattr(env, "obs_noise", 0.0))
+        )
         est = estimator.reset(env.measured)
 
         done = False

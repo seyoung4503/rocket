@@ -29,11 +29,28 @@ class LowPassEstimatorConfig:
     # Keep attitude/rate almost raw; over-filtering them removes attitude
     # damping and causes tip-over. The main noise problem for LandingPID is
     # translational velocity, so filter position/velocity lightly.
+    #
+    # These tau values are tuned for the 2x sensor-noise "noisy" regime. They
+    # are scaled by ``noise_scale`` at update time so clean inputs are passed
+    # nearly raw (scale -> 0 means no filtering, which avoids the lag penalty
+    # that hurt PID on the hard regime where obs_noise=0).
     pos_tau: float = 0.04
     vel_tau: float = 0.12
     quat_tau: float = 0.001
     omega_tau: float = 0.003
     derived_vel_mix: float = 0.0
+    noise_scale: float = 1.0  # multiplies all taus; 0 = passthrough, 1 = full
+
+    @classmethod
+    def for_obs_noise(cls, obs_noise: float, reference: float = 2.0) -> "LowPassEstimatorConfig":
+        """Build a config whose filter strength scales with the input noise.
+
+        Defaults are tuned for obs_noise=2 (the ``noisy`` regime), so
+        ``noise_scale = obs_noise / reference``: obs_noise=0 -> no filtering,
+        obs_noise=2 -> the full tuned filter.
+        """
+        scale = float(max(obs_noise, 0.0) / max(reference, 1e-6))
+        return cls(noise_scale=scale)
 
 
 class LowPassStateEstimator:
@@ -63,10 +80,13 @@ class LowPassStateEstimator:
         cfg = self.config
         out = self.state.copy()
 
-        a_pos = _alpha(dt, cfg.pos_tau)
-        a_vel = _alpha(dt, cfg.vel_tau)
-        a_quat = _alpha(dt, cfg.quat_tau)
-        a_omega = _alpha(dt, cfg.omega_tau)
+        # Scale all filter time constants by noise_scale: clean inputs pass
+        # through (scale -> 0 collapses tau -> 0 -> alpha -> 1.0).
+        s = cfg.noise_scale
+        a_pos = _alpha(dt, cfg.pos_tau * s)
+        a_vel = _alpha(dt, cfg.vel_tau * s)
+        a_quat = _alpha(dt, cfg.quat_tau * s)
+        a_omega = _alpha(dt, cfg.omega_tau * s)
 
         prev_pos = out[dyn.POS].copy()
         out[dyn.POS] = (1.0 - a_pos) * out[dyn.POS] + a_pos * measurement[dyn.POS]
