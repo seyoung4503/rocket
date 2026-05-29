@@ -512,4 +512,31 @@ Step 1 → Step 2 **hard +8pp, noisy +6pp**. 모든 landed_fail 카테고리에�
 
 자료: `docs/2026-05-29_1903_v1_spacex_actuator_results.md` (raw), `docs/2026-05-29_2045_v1_spacex_actuator_analysis.md` (분석).
 
+## 2026-05-29 21:10 (KST) — Step 3 (linearized 6-DOF MPC): divert_hard 에서 최고 (+4pp)
+
+**작업**: `src/rocketsim/controllers/scp_6dof_mpc.py` 새 파일 — 자세 φ (3, body 소각도 회전벡터) + 각속도 ω (3) 를 MPC *상태* 로 추가. 12-D state + 3-D control (T, gx, gy). 호버·수직 주변 single-shot linearization (`R(q)e_z ≈ e_z + (φ_y, −φ_x, 0)`, `τ_body ≈ m·g·L·(−gy, gx, 0)`) → fully convex SOCP, SCP iteration *없이* 단일 솔브. 점질량 떠나는 첫 단계. 래퍼 `LandingScp6DofWaypointPID` 는 기존 `LandingCvxpyWaypointPID` 의 lookahead=10 + HoverPID gate 머신을 그대로 재사용 (Step 1/2 와 *공정 비교*).
+
+**결과 (n=50, estimated)**:
+
+| | PID | actuator(la=10) | actuator2(la=10) | **scp (la=10)** |
+|---|---|---|---|---|
+| hard | 58% | **68%** | 64% | 58% |
+| noisy | **84%** | 78% | 72% | 74% |
+| divert | 78% | **90%** | **96%** | 84% |
+| divert_hard | 18% | 52% | 52% | **56%** ✨ |
+
+**의미**: Step 3 의 *자세 직접 모델링* 효과가 *극한 시나리오 (divert_hard)* 에서만 두드러짐. 평이한 시나리오는 Step 1 의 슬루 abstraction 으로 *이미 충분*. 가설 부분 검증 — "점질량 한계가 진짜로 풀리는 건 *큰 자세 거동 영역*". divert_hard 의 PID 18% / actuator 52% / scp 56% 격차는 *3배 → +4pp* 의 진행. McNemar 로는 50 ep 에서 statistically marginal 이지만 trend 일관.
+
+**한계**: 호버 주변 fixed linearization. tilt 30° 에서 R(q)e_z 의 sin θ 와 θ 차이 ~5%. Full SCP (매 replan iterative + trust region) 가면 추가 개선 가능성 — 단 single-shot 이 *이미* divert_hard 의 격차 회복 → 추가 효과 marginal 예상.
+
+**최종 baseline 현황**:
+- `actuator (la=10)` — hard/divert 의 best
+- `actuator2 (la=10)` — divert 의 best (96%)
+- `scp (la=10)` — divert_hard 의 best (56%)
+- `PID` — noisy 의 best (84%)
+
+→ 단일 우승자 없음. 시나리오별 적합 알고리즘 다름. 시뮬 baseline 형성 완료.
+
+자료: `docs/2026-05-29_2057_v1_step3_results.md` (raw), `docs/2026-05-29_2110_v1_step3_analysis.md` (분석).
+
 <!-- 새 항목은 이 줄 위에 추가 -->

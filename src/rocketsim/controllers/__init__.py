@@ -14,6 +14,10 @@ from .mpc import (
     SampledVerticalMPC,
 )
 from .pid import HoverPID
+from .scp_6dof_mpc import (
+    CvxpyScp6DofMPC,
+    LandingScp6DofWaypointPID,
+)
 from .trajectory_tracker import (
     LandingActuatorMagLagTrackingFullMPC,
     LandingActuatorMagLagTrackingMPC,
@@ -42,6 +46,9 @@ __all__ = [
     # Step 2: Step 1 + thrust-magnitude 1st-order lag.
     "CvxpyActuatorAwareMagLagMPC",
     "LandingActuatorAwareMagLagWaypointPID",
+    # Step 3: linearized 6-DOF MPC (attitude + omega as states).
+    "CvxpyScp6DofMPC",
+    "LandingScp6DofWaypointPID",
     # SpaceX-style time-indexed trajectory tracking (no `lookahead` knob);
     # see docs/2026-05-29_1653_v1_lookahead_vs_spacex_design.md.
     "LandingTrajectoryTrackingMPC",

@@ -51,6 +51,10 @@ CONTROLLERS = (
     # Step 2: Step 1 + thrust-magnitude 1st-order lag matching the EDF
     # spool-up tau (vehicle.thrust_time_constant). Still point-mass.
     "actuator2",
+    # Step 3: linearized 6-DOF MPC — attitude φ + body ω as states.
+    # First MPC that leaves the point-mass assumption.  Uses the same
+    # lookahead=10 wrapper machinery as actuator / actuator2.
+    "scp",
     # SpaceX-style time-indexed trajectory tracking variants — drop the
     # single-point lookahead in favor of plan-time-interpolated
     # (p_ref, v_ref, u_ff). See
@@ -107,6 +111,9 @@ def make_controller(name: str, env, plant_model: str):
     if name == "actuator2":
         from rocketsim.controllers import LandingActuatorAwareMagLagWaypointPID
         return LandingActuatorAwareMagLagWaypointPID(vehicle, env.world)
+    if name == "scp":
+        from rocketsim.controllers import LandingScp6DofWaypointPID
+        return LandingScp6DofWaypointPID(vehicle, env.world)
     if name == "tracking_pointmass":
         from rocketsim.controllers import LandingPointMassTrackingMPC
         return LandingPointMassTrackingMPC(vehicle, env.world)
