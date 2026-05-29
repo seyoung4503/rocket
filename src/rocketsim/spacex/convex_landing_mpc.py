@@ -141,6 +141,26 @@ class ConvexLandingMPC:
         # descending earlier rather than bouncing up. This encodes
         # "land sooner = better" without sacrificing fuel optimality.
         w_running_z: float = 0.5,
+        # ★ 2026-05-29 — Actuator-aware extensions.
+        # When ``slew_factor`` is set, the thrust-acceleration vector ``u``
+        # is promoted from control to state and a slew constraint
+        #   ||du[k]||_2 <= slew_factor * u_z[k] + slew_slack[k]
+        # is added (Step 1 from docs/.../hierarchical_mpc_plan.md).  This
+        # lets the plan account for the body's finite slew rate so the
+        # terminal hoverslam burst is *planned with lag in mind* rather
+        # than demanding instantaneous thrust reorientation that the EDF
+        # cannot deliver.  Set to ``None`` to disable.
+        slew_factor: float | None = None,
+        slew_slack_weight: float = 50.0,
+        # When ``tau_spool`` is set, a scalar lagged thrust-magnitude state
+        # T[k] is added with first-order dynamics
+        #   T[k+1] = a * T[k] + (1 - a) * T_cmd[k],  a = exp(-dt / tau)
+        # and the magnitude bound ``||u|| <= s`` is replaced with
+        # ``||u|| <= T``  (Açıkmeşe lossless conv with the *actual* lagged
+        # magnitude).  Set to ``None`` to disable, or to a positive value
+        # in seconds matching the vehicle's spool-up time constant
+        # (``vehicle.thrust_time_constant`` for our EDF).
+        tau_spool: float | None = None,
     ):
         try:
             import cvxpy as cp
@@ -173,8 +193,25 @@ class ConvexLandingMPC:
         # Hover acceleration (world frame) used as feed-forward floor.
         self._g_world = np.array([0.0, 0.0, -env.gravity])
         self._hover_acc = np.array([0.0, 0.0, env.gravity])
+        self._hover_mag = float(env.gravity)
         self._tan_tilt = float(np.tan(max_tilt))
         self._tan_glide = float(np.tan(np.deg2rad(glideslope_deg)))
+
+        # Actuator-aware feature flags + warm-start state.
+        self.slew_factor = (
+            float(slew_factor) if slew_factor is not None else None
+        )
+        self.slew_slack_weight = float(slew_slack_weight)
+        self.tau_spool = float(tau_spool) if tau_spool is not None else None
+        if self.tau_spool is not None:
+            # Exact zero-order-hold discretization for T[k+1] = a*T[k] + (1-a)*T_cmd[k]
+            self._mag_lag_a = float(np.exp(-self.dt / self.tau_spool))
+        else:
+            self._mag_lag_a = 0.0
+        # Warm-start: previous plan's first non-initial point.  For the
+        # very first call we fall back to hover.
+        self._last_u = self._hover_acc.copy()
+        self._last_T = self._hover_mag
 
     # ------------------------------------------------------------------
     def solve(self, t: float, state: np.ndarray) -> MpcPlan | None:
@@ -182,6 +219,15 @@ class ConvexLandingMPC:
 
         Returns an ``MpcPlan`` (full (p, v, u) trajectory + start_t) on
         success, or ``None`` if the solver fails.
+
+        Variable layout depends on the actuator-aware flags:
+
+          * default                 : ``u`` is a (3, N) control
+          * ``slew_factor`` set     : ``u`` is a (3, N+1) state, ``du`` is
+                                       the (3, N) control with slew SOC
+          * ``tau_spool`` set       : adds (N+1,) ``T`` state and (N,)
+                                       ``T_cmd`` control, ``||u|| <= T``
+                                       replaces ``||u|| <= s``
         """
         cp = self.cp
         remaining = self.T_final - t
@@ -190,12 +236,33 @@ class ConvexLandingMPC:
         # the controller is called before t=0 etc.
         N = min(N, int(round(self.T_final / self.dt)) + 2)
 
+        slew_on = self.slew_factor is not None
+        mag_lag_on = self.tau_spool is not None
+
         # ---- variables ----
         p = cp.Variable((3, N + 1))
         v = cp.Variable((3, N + 1))
-        u = cp.Variable((3, N))
-        s = cp.Variable(N, nonneg=True)          # ||u[:,k]|| <= s[k]
+        if slew_on:
+            u = cp.Variable((3, N + 1))          # thrust accel is a STATE
+            du = cp.Variable((3, N))             # rate is the control
+            slew_slack = cp.Variable(N, nonneg=True)
+        else:
+            u = cp.Variable((3, N))              # thrust accel is the control
+            du = None
+            slew_slack = None
+        if mag_lag_on:
+            T = cp.Variable(N + 1, nonneg=True)  # actual lagged magnitude
+            T_cmd = cp.Variable(N, nonneg=True)  # commanded magnitude
+            s = None
+        else:
+            T = None
+            T_cmd = None
+            s = cp.Variable(N, nonneg=True)      # ||u[:,k]|| <= s[k]
         soft = cp.Variable(N, nonneg=True)       # glideslope slack
+        # Descent-rate slack: the optimizer may need a few steps to
+        # decelerate from a fast initial descent.  Heavy penalty on this
+        # so the optimizer only uses it transiently.
+        desc_slack = cp.Variable(N, nonneg=True)
 
         pos0 = np.asarray(state[:3], dtype=float)
         vel0 = np.asarray(state[3:6], dtype=float)
@@ -207,27 +274,73 @@ class ConvexLandingMPC:
             p[:, 0] == pos0,
             v[:, 0] == vel0,
         ]
+        if slew_on:
+            # Warm-started initial thrust acceleration — what we expect
+            # the body to actually be producing right now.
+            constraints.append(u[:, 0] == np.asarray(self._last_u, float))
+        if mag_lag_on:
+            constraints.append(T[0] == float(self._last_T))
+
         cost = 0
         for k in range(N):
             acc = u[:, k] + g
+            # Per-step magnitude upper bound used inside the loop.
+            mag_bound = T[k] if mag_lag_on else s[k]
             constraints += [
                 # discrete dynamics (Euler / midpoint position)
                 p[:, k + 1] == p[:, k] + dt * v[:, k] + 0.5 * dt * dt * acc,
                 v[:, k + 1] == v[:, k] + dt * acc,
-                # lossless-conv magnitude bound
-                cp.norm(u[:, k], 2) <= s[k],
-                s[k] >= self.a_min,
-                s[k] <= self.a_max,
-                # one-sided thrust + tilt-cone
+                # lossless-conv magnitude bound: ||u|| <= mag_bound
+                cp.norm(u[:, k], 2) <= mag_bound,
+                # one-sided thrust + tilt-cone (gimbal direction limit)
                 u[2, k] >= 0,
                 cp.norm(u[:2, k], 2) <= self._tan_tilt * u[2, k],
                 # glideslope (with small slack)
                 cp.norm(p[:2, k], 2) <= self._tan_glide * p[2, k] + soft[k],
-                # ground & descent-rate
+                # ground constraint (initial state may already violate it,
+                # but a small numerical tolerance allows the boundary).
                 p[2, k] >= 0.0,
-                v[2, k] >= -self.v_max_desc,
             ]
-            cost = cost + self.w_fuel * s[k] + self.w_soft * cp.square(soft[k])
+            if k > 0:
+                # Descent rate (soft).  The initial vz can exceed
+                # v_max_desc (the hard preset starts at -3..-5 m/s), and
+                # even after deceleration begins it may take a few steps
+                # to get inside the limit.  A soft slack lets the
+                # optimizer ramp without making the problem infeasible.
+                constraints.append(
+                    v[2, k] + self.v_max_desc + desc_slack[k] >= 0
+                )
+            cost = cost + self.w_soft * cp.square(desc_slack[k])
+            if mag_lag_on:
+                # T_cmd is the magnitude actually being commanded (= fuel).
+                # T tracks T_cmd through a first-order lag matching the EDF
+                # spool-up time constant.
+                constraints += [
+                    T_cmd[k] >= self.a_min,
+                    T_cmd[k] <= self.a_max,
+                    T[k + 1]
+                    == self._mag_lag_a * T[k]
+                    + (1.0 - self._mag_lag_a) * T_cmd[k],
+                ]
+                cost = cost + self.w_fuel * T_cmd[k]
+            else:
+                constraints += [
+                    s[k] >= self.a_min,
+                    s[k] <= self.a_max,
+                ]
+                cost = cost + self.w_fuel * s[k]
+            if slew_on:
+                # Step 1: thrust-vector dynamics + slew SOC.  The slew
+                # bound scales with the current vertical thrust because
+                # lateral acceleration authority is limited by total
+                # thrust magnitude.
+                constraints += [
+                    u[:, k + 1] == u[:, k] + dt * du[:, k],
+                    cp.norm(du[:, k], 2)
+                    <= self.slew_factor * u[2, k] + slew_slack[k],
+                ]
+                cost = cost + self.slew_slack_weight * cp.square(slew_slack[k])
+            cost = cost + self.w_soft * cp.square(soft[k])
             # Running cost on altitude — encourages descent throughout
             # the trajectory instead of climbing-then-falling.
             cost = cost + self.w_running_z * cp.square(p[2, k])
@@ -255,11 +368,80 @@ class ConvexLandingMPC:
             return None
         p_arr = np.asarray(p.value, dtype=float)
         v_arr = np.asarray(v.value, dtype=float)
-        u_arr = np.asarray(u.value, dtype=float)
+        u_arr_full = np.asarray(u.value, dtype=float)
+        # In slew mode u has N+1 columns (state).  Return the first N so
+        # the tracker's time-indexing stays uniform across modes.
+        u_arr = u_arr_full[:, :N]
         if not (
             np.all(np.isfinite(p_arr))
             and np.all(np.isfinite(v_arr))
             and np.all(np.isfinite(u_arr))
         ):
             return None
+
+        # Warm-start the next solve from the planned values at step 1.
+        # This matches the receding-window pattern used by Step 1 / Step 2
+        # MPCs in src/rocketsim/controllers/mpc.py.
+        if slew_on and u_arr_full.shape[1] > 1:
+            self._last_u = u_arr_full[:, 1].copy()
+        if mag_lag_on and T.value is not None and T.value.size > 1:
+            self._last_T = float(T.value[1])
+
         return MpcPlan(p=p_arr, v=v_arr, u=u_arr, start_t=float(t), dt=self.dt)
+
+
+class ActuatorAwareLandingMPC(ConvexLandingMPC):
+    """Step 1 variant: ConvexLandingMPC + thrust-vector slew constraint.
+
+    Promotes ``u`` to a state with a hard SOC slew bound
+    ``||du[k]||_2 <= slew_factor * u_z[k] + slew_slack[k]`` so the plan
+    accounts for the body's finite slew rate (gimbal + attitude
+    response).  Otherwise identical to ``ConvexLandingMPC`` — min-fuel
+    cost, glideslope, shrinking horizon, terminal landing.
+    """
+
+    def __init__(
+        self,
+        vehicle: Vehicle,
+        env: Environment,
+        slew_factor: float = 0.9,
+        slew_slack_weight: float = 50.0,
+        **kwargs,
+    ):
+        super().__init__(
+            vehicle,
+            env,
+            slew_factor=slew_factor,
+            slew_slack_weight=slew_slack_weight,
+            **kwargs,
+        )
+
+
+class ActuatorMagLagLandingMPC(ConvexLandingMPC):
+    """Step 1 + Step 2: ActuatorAwareLandingMPC + thrust-magnitude lag.
+
+    Adds the lagged scalar magnitude ``T`` (matching the simulator's
+    ``vehicle.thrust_time_constant``) so the plan also accounts for the
+    EDF spool-up.  Replaces ``||u|| <= s`` with the lossless-convex
+    relaxation ``||u|| <= T``.
+    """
+
+    def __init__(
+        self,
+        vehicle: Vehicle,
+        env: Environment,
+        slew_factor: float = 0.9,
+        slew_slack_weight: float = 50.0,
+        tau_spool: float | None = None,
+        **kwargs,
+    ):
+        if tau_spool is None:
+            tau_spool = float(getattr(vehicle, "thrust_time_constant", 0.08))
+        super().__init__(
+            vehicle,
+            env,
+            slew_factor=slew_factor,
+            slew_slack_weight=slew_slack_weight,
+            tau_spool=tau_spool,
+            **kwargs,
+        )

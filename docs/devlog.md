@@ -489,4 +489,27 @@ Step 1 → Step 2 **hard +8pp, noisy +6pp**. 모든 landed_fail 카테고리에�
 
 **다음**: Step 3 (점질량 떠난 SCP 6-DOF) 또는 SpaceX-식 stack 에 actuator-aware constraint 포팅. 사용자 결정 대기.
 
+## 2026-05-29 20:45 (KST) — SpaceX MPC + actuator-aware (Step 1·2) 포팅: 두 가지 의외 결과
+
+**작업**: `ConvexLandingMPC` 에 옵션 파라미터 `slew_factor`, `tau_spool` 추가. 설정 시 `u` 를 state 로 승격 + `du` control + 슬루 SOC, T·T_cmd 추가 + 1차 지연 + `||u|| ≤ T` lossless conv. 편의 subclass `ActuatorAwareLandingMPC` / `ActuatorMagLagLandingMPC`. `LandingControllerSpaceX` 에 `planner_cls` 매개변수. eval 에 `spacex_actuator`, `spacex_actuator2` 추가. 부수 fix: descent-rate 제약을 k=0 에서 제외 + soft slack (hard IC 의 -3~-5 m/s 시작 vz 가 v_max_desc=2 와 strict infeasible 였음).
+
+**결과 (n=50, estimated)**:
+
+| | PID | actuator(la=10) | spacex(이전) | **spacex(now)** | spacex_actuator | spacex_actuator2 |
+|---|---|---|---|---|---|---|
+| hard | 58% | **68%** | 6% | **14%** | 10% | 8% |
+| noisy | **84%** | 78% | 22% | **28%** | 10% | 14% |
+| divert | 78% | **90%** | 4% | **32%** | 12% | 8% |
+| divert_hard | 18% | **52%** | 6% | **24%** | 10% | 10% |
+
+**의외 결과 1**: base spacex 가 descent slack fix 만으로 *부수적* 4-5배 개선. 이전 평가의 *대부분 실패* 가 *알고리즘 한계* 가 아니라 *제약 strict infeasibility* + fallback hover 였음. *진짜* SpaceX 식 성능은 *14-32%* 수준.
+
+**의외 결과 2**: Step 1/2 actuator-aware 가 base 보다 *모든 시나리오에서 나빠짐*. Touchdown 분해 결정적 — Step 1/2 가 *지면 도달율* 은 올렸지만 (14→29 in hard) *soft 비율* 폭락 (50% → 14%). 부드러운 plan + 약한 inner-loop (PID integrator/gate 부재) = 둔한 거동 + 정밀 commit 실패.
+
+**진짜 메커니즘**: plan 정확도 향상의 *방향성* 이 *inner-loop 강도* 에 따라 반대. PID-bundled (la=10) 위에선 약간 + 효과 (+6-8pp), spacex stack 위에선 - 효과 (-4-20pp). `actuator(la=10)` 의 wrapper 가 *우리 EDF + 단거리* 에 *극도로 최적화*.
+
+**최종 평가**: SpaceX 식 stack 은 *구조적으로 깔끔* 한 reference 로 보존. 실용 baseline 은 여전히 `actuator (la=10)`. Step 3 (SCP 6-DOF) 진행 시 *이미 강한* lookahead+PID wrapper 위에서 모델 정확도 효과 측정 권장.
+
+자료: `docs/2026-05-29_1903_v1_spacex_actuator_results.md` (raw), `docs/2026-05-29_2045_v1_spacex_actuator_analysis.md` (분석).
+
 <!-- 새 항목은 이 줄 위에 추가 -->

@@ -15,13 +15,20 @@ level differences vs the lookahead/wrapper approach we used previously.
 """
 
 from .attitude_controller import AttitudeController
-from .convex_landing_mpc import ConvexLandingMPC, MpcPlan
+from .convex_landing_mpc import (
+    ActuatorAwareLandingMPC,
+    ActuatorMagLagLandingMPC,
+    ConvexLandingMPC,
+    MpcPlan,
+)
 from .landing_controller import LandingControllerSpaceX
 from .trajectory_tracker import TrajectoryTracker
 
 __all__ = [
     "AttitudeController",
     "ConvexLandingMPC",
+    "ActuatorAwareLandingMPC",
+    "ActuatorMagLagLandingMPC",
     "MpcPlan",
     "TrajectoryTracker",
     "LandingControllerSpaceX",

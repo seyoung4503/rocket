@@ -67,6 +67,10 @@ CONTROLLERS = (
     # min-fuel convex MPC + glideslope + shrinking horizon + time-indexed
     # PD+I tracker. See docs/2026-05-29_1753_v1_spacex_style_design.md.
     "spacex",
+    # SpaceX stack with Step 1 (slew) / Step 1+2 (slew + thrust-mag lag)
+    # actuator-aware constraints ported into the convex landing MPC.
+    "spacex_actuator",
+    "spacex_actuator2",
 )
 MODES = ("true", "measured", "estimated")
 
@@ -124,6 +128,22 @@ def make_controller(name: str, env, plant_model: str):
     if name == "spacex":
         from rocketsim.spacex import LandingControllerSpaceX
         return LandingControllerSpaceX(vehicle, env.world)
+    if name == "spacex_actuator":
+        from rocketsim.spacex import (
+            ActuatorAwareLandingMPC,
+            LandingControllerSpaceX,
+        )
+        return LandingControllerSpaceX(
+            vehicle, env.world, planner_cls=ActuatorAwareLandingMPC
+        )
+    if name == "spacex_actuator2":
+        from rocketsim.spacex import (
+            ActuatorMagLagLandingMPC,
+            LandingControllerSpaceX,
+        )
+        return LandingControllerSpaceX(
+            vehicle, env.world, planner_cls=ActuatorMagLagLandingMPC
+        )
     raise ValueError(f"unknown controller: {name}")
 
 

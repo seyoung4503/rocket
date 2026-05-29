@@ -64,11 +64,19 @@ class LandingControllerSpaceX:
         kp_pos: tuple[float, float, float] = (1.6, 1.6, 6.0),
         kd_pos: tuple[float, float, float] = (2.4, 2.4, 6.0),
         ki_pos: tuple[float, float, float] = (0.6, 0.6, 1.5),
+        # ★ 2026-05-29 — swap in actuator-aware planners.
+        # planner_cls is called with the same kwargs that get forwarded
+        # to ConvexLandingMPC (T_final, dt, max_tilt, glideslope_deg,
+        # v_max_desc).  Defaults to the base ConvexLandingMPC; use
+        # ActuatorAwareLandingMPC for Step 1 (slew) or
+        # ActuatorMagLagLandingMPC for Step 1+2 (slew + thrust-magnitude lag).
+        planner_cls=ConvexLandingMPC,
+        planner_kwargs: dict | None = None,
     ):
         self.vehicle = vehicle
         self.env = env
         self.replan_dt = float(replan_dt)
-        self.mpc = ConvexLandingMPC(
+        self.mpc = planner_cls(
             vehicle,
             env,
             T_final=T_final,
@@ -76,6 +84,7 @@ class LandingControllerSpaceX:
             max_tilt=mpc_max_tilt,
             glideslope_deg=glideslope_deg,
             v_max_desc=v_max_desc,
+            **(planner_kwargs or {}),
         )
         self.tracker = TrajectoryTracker(
             kp_pos=kp_pos, kd_pos=kd_pos, ki_pos=ki_pos
