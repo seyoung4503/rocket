@@ -51,6 +51,18 @@ CONTROLLERS = (
     # Step 2: Step 1 + thrust-magnitude 1st-order lag matching the EDF
     # spool-up tau (vehicle.thrust_time_constant). Still point-mass.
     "actuator2",
+    # SpaceX-style time-indexed trajectory tracking variants — drop the
+    # single-point lookahead in favor of plan-time-interpolated
+    # (p_ref, v_ref, u_ff). See
+    # docs/2026-05-29_1653_v1_lookahead_vs_spacex_design.md.
+    "tracking_pointmass",
+    "tracking_actuator",
+    "tracking_actuator2",
+    # Full SpaceX-style: bare tracker + position integrator + landing gate
+    # + touchdown commit. See trajectory_tracker.LandingTrajectoryTrackingFullMPC.
+    "full_pointmass",
+    "full_actuator",
+    "full_actuator2",
 )
 MODES = ("true", "measured", "estimated")
 
@@ -87,6 +99,24 @@ def make_controller(name: str, env, plant_model: str):
     if name == "actuator2":
         from rocketsim.controllers import LandingActuatorAwareMagLagWaypointPID
         return LandingActuatorAwareMagLagWaypointPID(vehicle, env.world)
+    if name == "tracking_pointmass":
+        from rocketsim.controllers import LandingPointMassTrackingMPC
+        return LandingPointMassTrackingMPC(vehicle, env.world)
+    if name == "tracking_actuator":
+        from rocketsim.controllers import LandingActuatorTrackingMPC
+        return LandingActuatorTrackingMPC(vehicle, env.world)
+    if name == "tracking_actuator2":
+        from rocketsim.controllers import LandingActuatorMagLagTrackingMPC
+        return LandingActuatorMagLagTrackingMPC(vehicle, env.world)
+    if name == "full_pointmass":
+        from rocketsim.controllers import LandingPointMassTrackingFullMPC
+        return LandingPointMassTrackingFullMPC(vehicle, env.world)
+    if name == "full_actuator":
+        from rocketsim.controllers import LandingActuatorTrackingFullMPC
+        return LandingActuatorTrackingFullMPC(vehicle, env.world)
+    if name == "full_actuator2":
+        from rocketsim.controllers import LandingActuatorMagLagTrackingFullMPC
+        return LandingActuatorMagLagTrackingFullMPC(vehicle, env.world)
     raise ValueError(f"unknown controller: {name}")
 
 

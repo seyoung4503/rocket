@@ -14,6 +14,16 @@ from .mpc import (
     SampledVerticalMPC,
 )
 from .pid import HoverPID
+from .trajectory_tracker import (
+    LandingActuatorMagLagTrackingFullMPC,
+    LandingActuatorMagLagTrackingMPC,
+    LandingActuatorTrackingFullMPC,
+    LandingActuatorTrackingMPC,
+    LandingPointMassTrackingFullMPC,
+    LandingPointMassTrackingMPC,
+    LandingTrajectoryTrackingFullMPC,
+    LandingTrajectoryTrackingMPC,
+)
 
 __all__ = [
     "HoverPID",
@@ -32,4 +42,16 @@ __all__ = [
     # Step 2: Step 1 + thrust-magnitude 1st-order lag.
     "CvxpyActuatorAwareMagLagMPC",
     "LandingActuatorAwareMagLagWaypointPID",
+    # SpaceX-style time-indexed trajectory tracking (no `lookahead` knob);
+    # see docs/2026-05-29_1653_v1_lookahead_vs_spacex_design.md.
+    "LandingTrajectoryTrackingMPC",
+    "LandingPointMassTrackingMPC",
+    "LandingActuatorTrackingMPC",
+    "LandingActuatorMagLagTrackingMPC",
+    # Full SpaceX-style: time-indexed + position integrator + landing gate
+    # + touchdown commit. Closer to the proper GNC stack.
+    "LandingTrajectoryTrackingFullMPC",
+    "LandingPointMassTrackingFullMPC",
+    "LandingActuatorTrackingFullMPC",
+    "LandingActuatorMagLagTrackingFullMPC",
 ]
