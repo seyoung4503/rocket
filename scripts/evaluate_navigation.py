@@ -63,6 +63,10 @@ CONTROLLERS = (
     "full_pointmass",
     "full_actuator",
     "full_actuator2",
+    # Proper SpaceX-style stack built from scratch in src/rocketsim/spacex:
+    # min-fuel convex MPC + glideslope + shrinking horizon + time-indexed
+    # PD+I tracker. See docs/2026-05-29_1753_v1_spacex_style_design.md.
+    "spacex",
 )
 MODES = ("true", "measured", "estimated")
 
@@ -117,6 +121,9 @@ def make_controller(name: str, env, plant_model: str):
     if name == "full_actuator2":
         from rocketsim.controllers import LandingActuatorMagLagTrackingFullMPC
         return LandingActuatorMagLagTrackingFullMPC(vehicle, env.world)
+    if name == "spacex":
+        from rocketsim.spacex import LandingControllerSpaceX
+        return LandingControllerSpaceX(vehicle, env.world)
     raise ValueError(f"unknown controller: {name}")
 
 
