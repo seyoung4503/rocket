@@ -209,8 +209,10 @@ def _run_one_episode(args):
     process, runs one episode, and returns a small dict. All work is local to
     the worker, so episodes can run in true parallel across CPU cores.
     """
-    ep, difficulty, controller_name, mode, plant_model = args
-    env = make_landing_env(difficulty)
+    ep, difficulty, controller_name, mode, plant_model, edf_roll, edf_roll_scale = args
+    env = make_landing_env(
+        difficulty, edf_roll=edf_roll, edf_roll_scale=edf_roll_scale
+    )
     env.reset(seed=ep)
     ctrl = make_controller(controller_name, env, plant_model)
     estimator = LowPassStateEstimator(
@@ -291,20 +293,27 @@ def eval_mode(
     n: int,
     plant_model: str,
     n_workers: int = 1,
+    edf_roll: bool = False,
+    edf_roll_scale: float = 1.0,
 ):
     if n_workers > 1:
         from concurrent.futures import ProcessPoolExecutor
 
         args_list = [
-            (ep, difficulty, controller_name, mode, plant_model) for ep in range(n)
+            (ep, difficulty, controller_name, mode, plant_model, edf_roll, edf_roll_scale)
+            for ep in range(n)
         ]
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
             results = list(ex.map(_run_one_episode, args_list, chunksize=1))
-        env_ref = make_landing_env(difficulty)
+        env_ref = make_landing_env(
+            difficulty, edf_roll=edf_roll, edf_roll_scale=edf_roll_scale
+        )
         env_ref.reset(seed=0)
         return _aggregate_results(results, env_ref)
 
-    env = make_landing_env(difficulty)
+    env = make_landing_env(
+        difficulty, edf_roll=edf_roll, edf_roll_scale=edf_roll_scale
+    )
     succ = 0
     landed = 0
     reasons: dict[str, int] = {}
@@ -538,6 +547,19 @@ def main() -> int:
         default=1,
         help="number of parallel worker processes (1 = sequential)",
     )
+    ap.add_argument(
+        "--edf-roll",
+        action="store_true",
+        help="enable EDF fan reaction torque + gyroscopic precession "
+             "(see docs/2026-05-29_2108_v1_edf_roll_physics_design.md)",
+    )
+    ap.add_argument(
+        "--edf-roll-scale",
+        type=float,
+        default=1.0,
+        help="scale factor on EDF roll torque/inertia (1.0 = single fan, "
+             "0.1 = ~90 percent cancelled by counter-rotating fan)",
+    )
     args = ap.parse_args()
 
     difficulties = (
@@ -573,6 +595,8 @@ def main() -> int:
                     args.episodes,
                     args.plant_model,
                     n_workers=args.workers,
+                    edf_roll=args.edf_roll,
+                    edf_roll_scale=args.edf_roll_scale,
                 )
                 print_result(mode, result, args.episodes)
                 records.append(

@@ -237,9 +237,23 @@ class LandingEnv(gym.Env):
         return self._obs(), float(reward), terminated, truncated, info
 
 
-def make_landing_env(difficulty: str = "calm", **kwargs) -> LandingEnv:
+def make_landing_env(
+    difficulty: str = "calm",
+    edf_roll: bool = False,
+    edf_roll_scale: float = 1.0,
+    **kwargs,
+) -> LandingEnv:
     """Factory: difficulty in
-    {calm, moderate, hard, unknown, recovery, noisy, divert, divert_hard}."""
+    {calm, moderate, hard, unknown, recovery, noisy, divert, divert_hard}.
+
+    ``edf_roll=True`` toggles the EDF fan reaction torque + gyroscopic
+    precession on the vehicle (see docs/2026-05-29_2108).  Default off so
+    existing experiments stay backward compatible.  ``edf_roll_scale``
+    multiplies both the reaction-torque coefficient and the gyroscopic
+    angular momentum (= modeling partial counter-rotation cancellation
+    or an EDF that is intrinsically less roll-noisy); 1.0 = single-fan
+    full strength, 0.1 = ~90 % cancelled by a counter-rotating fan.
+    """
     from ..scenarios import disturbances as D
 
     presets = {"calm": D.calm, "moderate": D.moderate, "hard": D.hard, "unknown": D.model_unknown}
@@ -263,4 +277,15 @@ def make_landing_env(difficulty: str = "calm", **kwargs) -> LandingEnv:
     else:
         dist, rand = presets[difficulty]()
         scenario = LandingScenario.hard() if difficulty == "hard" else LandingScenario()
-    return LandingEnv(scenario=scenario, disturbance=dist, randomization=rand, **kwargs)
+    env = LandingEnv(scenario=scenario, disturbance=dist, randomization=rand, **kwargs)
+    if edf_roll:
+        # Enable EDF fan reaction torque + gyroscopic precession on both
+        # the controller-facing base vehicle and the simulator's vehicle.
+        # Values follow the design doc estimates for a small 90 mm EDF,
+        # scaled by edf_roll_scale to model counter-rotating-fan cancellation.
+        scale = float(edf_roll_scale)
+        for v in (env.base, env.vehicle):
+            v.edf_roll_coeff = 0.012 * scale  # N·m per N thrust
+            v.edf_fan_inertia = 1.0e-4 * scale  # kg·m² (effective net spin)
+            v.edf_fan_omega_max = 4000.0  # rad/s at max thrust (per fan)
+    return env

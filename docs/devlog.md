@@ -584,4 +584,28 @@ Step 1 → Step 2 **hard +8pp, noisy +6pp**. 모든 landed_fail 카테고리에�
 
 자료: `docs/2026-05-29_2126_v1_scp_warm_results.md` (raw without TR), `docs/2026-05-29_2155_v1_robust_controller_analysis.md` (분석 + TR 추가).
 
+## 2026-05-29 22:22 (KST) — Full SCP marginal + EDF roll cliff edge
+
+**Full SCP (multi-iteration)**: `CvxpyScpFull6DofMPC` 추가 — 매 replan 마다 *수렴할 때까지* SCP 반복 (최대 3 iter, ||φ|| < 0.02 rad). 결과 — 진단 (`docs/2026-05-29_2110_v1_*`) 의 예측대로 *거의 효과 없음*: scp_warm 70/74/84/60 vs scp_full 64/74/86/60. worst-case 동일 60%. **이유**: vehicle 의 대부분 시간 < 10° tilt → linearization 오차 < 1% → 수렴 반복해도 *수렴할 곳이 없음*. 학습/완성도 가치 있고 시뮬-real 갭이 커진 향후 단계에서 의미 있을 가능성.
+
+**EDF roll 물리 구현** (`docs/2026-05-29_2108_v1_*` 의 설계 실현): `Vehicle.edf_roll_coeff/edf_fan_inertia/edf_fan_omega_max` opt-in 파라미터. `dynamics.py` 에 *반작용 토크* + *자이로 세차* 추가. 단위 테스트 3개 (모두 통과). `make_landing_env(edf_roll=True, edf_roll_scale=...)` + `evaluate_navigation.py --edf-roll --edf-roll-scale ...`.
+
+**Cliff-edge 결과**:
+
+| edf_roll_scale | actuator | scp_warm |
+|---|---|---|
+| 0.00 (없음) | 70% | 70% |
+| **0.05** (95% 상쇄) | **5%** ⚠️ | **0%** ⚠️ |
+| 0.10 | 0% | 0% |
+| 0.50 | 0% | 0% |
+| 1.00 (싱글 팬) | 0% | 0% |
+
+→ **scale 0.00 → 0.05 의 *cliff edge*** — 70% 에서 0% 로 *떨어짐*. 실패 모드 거의 다 `crash_tilt` 또는 `out_of_bounds`. 자세 PID 가 *roll 토크 채널* 접근 권한 *없음* (gimbal × thrust 의 z 성분 = 0).
+
+**의미** — *전체 baseline 의 의미를 바꿈*:
+- worst-case 60% 는 *roll 물리 *없는* 가정* 하에. 실제 EDF 단일 팬은 **0%** 박살.
+- 시뮬 알고리즘 마이크로-튜닝의 *한계* 명확. 진짜 robust system → **카운터-rotation 만으로는 부족** (95% 상쇄도 cliff). **Active roll control 채널 필수** (RCS, 반작용 휠, blade 가변 피치) — 또는 로켓 엔진으로 전환.
+
+자료: `docs/2026-05-29_2203_v1_scp_full_results.md` (raw), `docs/2026-05-29_2212_v1_scp_full_analysis.md`, `docs/2026-05-29_2222_v1_edf_roll_implementation.md`.
+
 <!-- 새 항목은 이 줄 위에 추가 -->
