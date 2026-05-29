@@ -539,4 +539,18 @@ Step 1 → Step 2 **hard +8pp, noisy +6pp**. 모든 landed_fail 카테고리에�
 
 자료: `docs/2026-05-29_2057_v1_step3_results.md` (raw), `docs/2026-05-29_2110_v1_step3_analysis.md` (분석).
 
+## 2026-05-29 21:08 (KST) — 시뮬에 roll 구동 물리 부재 발견 → EDF 물리는 별도 "세계"로 (설계만)
+
+**발견**: 현재 시뮬(`dynamics.py`)이 엔진을 *순수 짐벌 추력 벡터*로 모델링해서 **roll(z축) 구동 항이 없다**. 토크 = `cross(r_engine, f_thrust_body)` 라 z성분 항상 0, `disturbances.py`도 z축 외란 0 처리. 시뮬은 *완전한 3D/6-DOF* 이고 roll 동역학도 적분되지만(omega_z 주면 돔), roll을 *구동하는 힘* 이 없어 0에 고정. 이름은 "EDF testbed"인데 동역학은 *로켓엔진(짐벌 노즐)* 처럼 짜여 EDF 팬 회전 물리가 빠짐.
+
+**실세계 EDF roll 물리 (1차)**: 팬을 회전 로터로 보면 — ① 반작용 토크(지배적, `Q = thrust·D·C_Q/C_T`, 추력 비례, 측정 불가 외란) ② 자이로 세차(`-ω×H_fan`, 축간 커플링). hover 추력 24.5N → Q≈0.29 N·m, roll 관성 0.004 → ~70 rad/s² 로 *roll 제어 없이는 발산* (실물이 카운터-로테이팅/RCS 쓰는 이유).
+
+**결정**: EDF roll 물리를 *지금 코드에 박지 않는다.* 현재 SpaceX/actuator-MPC 실험 마무리 후, **별도 새 "세계"** 에 넣는다. 이유: 나중에 로켓엔진으로 전환 예정(팬 반작용 없음) → 공용 모델 오염 방지 + "엔진 물리 갈아끼우기" 실험 노하우 축적.
+
+**설계 (pluggable propulsion)**: 6-DOF 강체 적분기는 범용 유지(`(state,cmd)→force,torque,내부상태미분`), 추진 모델 분리 — `EdfPropulsion`(반작용+자이로+스풀lag) / `RocketPropulsion`(순수 짐벌+TVC서보+터보펌프/슬로싱, 나중). TVC = **유닛 전체 짐벌** 로 결정(소형 EDF 표준, 기존 모델과 일관).
+
+**구현 시 정할 것**: 분리 단위(`propulsion/` 모듈 vs 새 world 클래스), 범위((a)반작용만/(b)+자이로/(c)+roll 제어채널), 계수는 추정치→EDF 벤치 캘리브레이션.
+
+자료: `docs/2026-05-29_2108_v1_edf_roll_physics_design.md`. (코드 변경 없음 — 설계 결정만.)
+
 <!-- 새 항목은 이 줄 위에 추가 -->
