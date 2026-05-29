@@ -24,15 +24,28 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from rocketsim import dynamics as dyn  # noqa: E402
 from rocketsim import quaternion as quat  # noqa: E402
-from rocketsim.controllers import CvxpyPointMassMPC, LandingCvxpyMPC  # noqa: E402
+from rocketsim.controllers import (  # noqa: E402
+    CvxpyActuatorAwareMagLagMPC,
+    CvxpyActuatorAwareMPC,
+    CvxpyPointMassMPC,
+    LandingCvxpyMPC,
+)
 from rocketsim.envs import make_landing_env  # noqa: E402
 
 
-def run_episode(difficulty: str, seed: int, plant_model: str) -> dict:
+PLANNERS = {
+    "pointmass": CvxpyPointMassMPC,
+    "actuator": CvxpyActuatorAwareMPC,
+    "actuator2": CvxpyActuatorAwareMagLagMPC,
+}
+
+
+def run_episode(difficulty: str, seed: int, plant_model: str, mpc_name: str = "pointmass") -> dict:
     env = make_landing_env(difficulty)
     env.reset(seed=seed)
     model_vehicle = env.vehicle if plant_model == "oracle" else env.base
-    planner = CvxpyPointMassMPC(model_vehicle, env.world)
+    PlannerCls = PLANNERS[mpc_name]
+    planner = PlannerCls(model_vehicle, env.world)
     tracker = LandingCvxpyMPC(model_vehicle, env.world)
 
     plan = planner.plan(env.state[dyn.POS], env.state[dyn.VEL])
@@ -171,17 +184,28 @@ def main() -> int:
     ap.add_argument("--plant-models", default="nominal,oracle")
     ap.add_argument("--episodes", type=int, default=20)
     ap.add_argument("--output", default=None)
+    ap.add_argument(
+        "--mpcs",
+        default="pointmass",
+        help=f"comma-separated MPC planners: {', '.join(PLANNERS)}",
+    )
     args = ap.parse_args()
 
     records = []
     difficulties = [d.strip() for d in args.difficulties.split(",") if d.strip()]
     plant_models = [m.strip() for m in args.plant_models.split(",") if m.strip()]
-    for difficulty in difficulties:
-        for plant_model in plant_models:
-            rows = [run_episode(difficulty, seed, plant_model) for seed in range(args.episodes)]
-            summary = summarize(rows)
-            print_summary(f"{difficulty} / {plant_model}", summary, args.episodes)
-            records.append((difficulty, plant_model, summary))
+    mpcs = [m.strip() for m in args.mpcs.split(",") if m.strip()]
+    for mpc_name in mpcs:
+        for difficulty in difficulties:
+            for plant_model in plant_models:
+                rows = [
+                    run_episode(difficulty, seed, plant_model, mpc_name)
+                    for seed in range(args.episodes)
+                ]
+                summary = summarize(rows)
+                label = f"{mpc_name} / {difficulty} / {plant_model}"
+                print_summary(label, summary, args.episodes)
+                records.append((f"{mpc_name}|{difficulty}", plant_model, summary))
 
     if args.output:
         write_markdown(Path(args.output), records, args.episodes)

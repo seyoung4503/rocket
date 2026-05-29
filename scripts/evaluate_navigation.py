@@ -40,7 +40,18 @@ from rocketsim.navigation import LowPassStateEstimator  # noqa: E402
 from rocketsim.navigation.estimator import LowPassEstimatorConfig  # noqa: E402
 
 
-CONTROLLERS = ("pid", "vertical", "cvxpy", "guidance", "waypoint", "feasible", "full")
+CONTROLLERS = (
+    "pid", "vertical", "cvxpy", "guidance", "waypoint", "feasible", "full",
+    "actuator",  # Step 1 actuator-aware MPC + PID waypoint (2026-05-29 v1)
+    # A/B sweep on horizontal-tracking aggressiveness in the actuator-aware MPC
+    # (q_pos[xy] / q_final_pos[xy]). Default is 1.2 / 45 which causes ~96%
+    # gimbal saturation; A and B relax those weights 4x / 8x respectively.
+    "actuator_a",
+    "actuator_b",
+    # Step 2: Step 1 + thrust-magnitude 1st-order lag matching the EDF
+    # spool-up tau (vehicle.thrust_time_constant). Still point-mass.
+    "actuator2",
+)
 MODES = ("true", "measured", "estimated")
 
 
@@ -60,6 +71,22 @@ def make_controller(name: str, env, plant_model: str):
         return LandingFeasibleWaypointMPC(vehicle, env.world)
     if name == "full":
         return LandingFullDynamicsMPC(vehicle, env.world)
+    if name == "actuator":
+        from rocketsim.controllers import LandingActuatorAwareWaypointPID
+        return LandingActuatorAwareWaypointPID(vehicle, env.world)
+    if name == "actuator_a":
+        from rocketsim.controllers import LandingActuatorAwareWaypointPID
+        return LandingActuatorAwareWaypointPID(
+            vehicle, env.world, q_pos_xy=0.3, q_final_pos_xy=15.0
+        )
+    if name == "actuator_b":
+        from rocketsim.controllers import LandingActuatorAwareWaypointPID
+        return LandingActuatorAwareWaypointPID(
+            vehicle, env.world, q_pos_xy=0.15, q_final_pos_xy=8.0
+        )
+    if name == "actuator2":
+        from rocketsim.controllers import LandingActuatorAwareMagLagWaypointPID
+        return LandingActuatorAwareMagLagWaypointPID(vehicle, env.world)
     raise ValueError(f"unknown controller: {name}")
 
 
@@ -74,7 +101,108 @@ def summarize_touchdown(env):
     }
 
 
-def eval_mode(difficulty: str, controller_name: str, mode: str, n: int, plant_model: str):
+def _run_one_episode(args):
+    """Top-level worker function for ProcessPoolExecutor (must be picklable).
+
+    Each call constructs a FRESH env/controller/estimator inside the worker
+    process, runs one episode, and returns a small dict. All work is local to
+    the worker, so episodes can run in true parallel across CPU cores.
+    """
+    ep, difficulty, controller_name, mode, plant_model = args
+    env = make_landing_env(difficulty)
+    env.reset(seed=ep)
+    ctrl = make_controller(controller_name, env, plant_model)
+    estimator = LowPassStateEstimator(
+        LowPassEstimatorConfig.for_obs_noise(getattr(env, "obs_noise", 0.0))
+    )
+    est = estimator.reset(env.measured)
+
+    done = False
+    ep_energy = 0.0
+    while not done:
+        if mode == "true":
+            ctrl_state = env.state
+        elif mode == "measured":
+            ctrl_state = env.measured
+        elif mode == "estimated":
+            ctrl_state = est
+        else:
+            raise ValueError(f"unknown mode: {mode}")
+        cmd = ctrl(env.t, ctrl_state)
+        ep_energy += cmd.throttle * env.control_dt
+        _, _, term, trunc, info = env.step(env.command_to_action(cmd))
+        if mode == "estimated":
+            est = estimator.update(env.measured, env.control_dt)
+        done = term or trunc
+
+    reason = info.get("reason", "")
+    out = {
+        "ep": ep,
+        "reason": reason,
+        "success": bool(info.get("success", False)),
+        "energy": ep_energy,
+        "touchdown": summarize_touchdown(env) if reason == "touchdown" else None,
+    }
+    return out
+
+
+def _aggregate_results(results, env_for_thresholds):
+    """Combine per-episode dicts into the shape eval_mode used to return."""
+    succ = 0
+    landed = 0
+    reasons: dict[str, int] = {}
+    fail = {"offset": 0, "vspeed": 0, "hspeed": 0, "tilt": 0}
+    touchdown = []
+    energy = []
+    sc = env_for_thresholds.scenario
+    for r in sorted(results, key=lambda d: d["ep"]):
+        reason = r["reason"]
+        reasons[reason] = reasons.get(reason, 0) + 1
+        succ += int(r["success"])
+        energy.append(r["energy"])
+        if reason == "touchdown" and r["touchdown"] is not None:
+            landed += 1
+            metrics = r["touchdown"]
+            touchdown.append(metrics)
+            if not r["success"]:
+                if metrics["offset"] > sc.max_touchdown_offset:
+                    fail["offset"] += 1
+                if metrics["vspeed"] > sc.max_touchdown_vspeed:
+                    fail["vspeed"] += 1
+                if metrics["hspeed"] > sc.max_touchdown_hspeed:
+                    fail["hspeed"] += 1
+                if metrics["tilt"] > sc.max_touchdown_tilt_deg:
+                    fail["tilt"] += 1
+    return {
+        "success": succ,
+        "landed": landed,
+        "reasons": reasons,
+        "fail": fail,
+        "touchdown": touchdown,
+        "energy": energy,
+    }
+
+
+def eval_mode(
+    difficulty: str,
+    controller_name: str,
+    mode: str,
+    n: int,
+    plant_model: str,
+    n_workers: int = 1,
+):
+    if n_workers > 1:
+        from concurrent.futures import ProcessPoolExecutor
+
+        args_list = [
+            (ep, difficulty, controller_name, mode, plant_model) for ep in range(n)
+        ]
+        with ProcessPoolExecutor(max_workers=n_workers) as ex:
+            results = list(ex.map(_run_one_episode, args_list, chunksize=1))
+        env_ref = make_landing_env(difficulty)
+        env_ref.reset(seed=0)
+        return _aggregate_results(results, env_ref)
+
     env = make_landing_env(difficulty)
     succ = 0
     landed = 0
@@ -300,6 +428,12 @@ def main() -> int:
         help="comma-separated: true, measured, estimated",
     )
     ap.add_argument("--output", default=None, help="optional markdown output path")
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="number of parallel worker processes (1 = sequential)",
+    )
     args = ap.parse_args()
 
     difficulties = (
@@ -334,6 +468,7 @@ def main() -> int:
                     mode,
                     args.episodes,
                     args.plant_model,
+                    n_workers=args.workers,
                 )
                 print_result(mode, result, args.episodes)
                 records.append(
