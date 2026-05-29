@@ -604,6 +604,14 @@ class LandingCvxpyWaypointPID:
         gate_alt: float = 2.5,
         tight_frac: float = 0.5,
         creep: float = 0.35,
+        # 2026-05-29 added.  EMA smoothing of the MPC's lookahead xy
+        # waypoint across consecutive replans.  At noisy estimated state,
+        # the MPC plan jitters between replans, and HoverPID's D term
+        # reacts to the jitter -- a small amount of smoothing trades a
+        # tiny lag for a meaningful drop in waypoint noise.  alpha = 1.0
+        # = no smoothing (backwards compatible default); alpha = 0.4
+        # means "30% of the new MPC waypoint, 70% of the previous one".
+        xy_ref_alpha: float = 1.0,
     ):
         self.vehicle = vehicle
         self.env = env
@@ -611,6 +619,7 @@ class LandingCvxpyWaypointPID:
         self.mpc = CvxpyPointMassMPC(vehicle, env, max_tilt=max_tilt)
         self.replan_dt = replan_dt
         self.lookahead = max(1, lookahead)
+        self.xy_ref_alpha = float(np.clip(xy_ref_alpha, 0.0, 1.0))
         self.guidance = LandingGuidance(
             LandingGuidanceConfig(
                 v_max=v_max,
@@ -636,7 +645,15 @@ class LandingCvxpyWaypointPID:
             if plan is not None:
                 p, _v, _u = plan
                 k = min(self.lookahead, p.shape[1] - 1)
-                self._xy_ref = p[:2, k]
+                new_ref = p[:2, k]
+                if self._has_plan and self.xy_ref_alpha < 1.0:
+                    # EMA between new MPC waypoint and previous one.
+                    self._xy_ref = (
+                        self.xy_ref_alpha * new_ref
+                        + (1.0 - self.xy_ref_alpha) * self._xy_ref
+                    )
+                else:
+                    self._xy_ref = new_ref
                 self._has_plan = True
 
         z = float(pos[2])

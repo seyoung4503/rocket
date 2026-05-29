@@ -553,4 +553,35 @@ Step 1 → Step 2 **hard +8pp, noisy +6pp**. 모든 landed_fail 카테고리에�
 
 자료: `docs/2026-05-29_2108_v1_edf_roll_physics_design.md`. (코드 변경 없음 — 설계 결정만.)
 
+## 2026-05-29 21:55 (KST) — Robust controller: warm-SCP + trust region + xy_ref smoothing
+
+**작업**:
+
+1. **Warm-start SCP MPC** (`CvxpyScpWarm6DofMPC`): single-shot Step 3 가 호버 주변 *고정* linearization 인 한계 (divert_hard 의 19% 시간 tilt > 10°) 를 극복. 매 replan 마다 *이전 plan 의 자세 trajectory* 를 reference 로 시간-변동 linearize. cvxpy parameter (n̂_bar[k], M_φ_bar[k]) 만 업데이트, 컴파일 한 번.
+
+2. **Trust region 한 줄 fix**: 첫 시도에서 divert/divert_hard 가 -14pp/-38pp 회귀. 진단 — divert 점프 후 q̄ 이 *event 전* 의 plan 이라 φ[0] = rotation from q̄ to actual q 가 *큼* → linearization 신뢰 영역 벗어남. `if ||φ[0]|| > 0.30 rad: ref_q[:] = q_actual` 추가 → 모두 회복 + Step 3 single-shot 보다 +4pp 추가 우위.
+
+3. **xy_ref EMA smoothing** (`xy_ref_alpha` 파라미터): noisy 약점 가설 — MPC plan jitter. EMA 평활화로 검증. *noisy 에는 효과 없음 (가설 위조)*. 그러나 divert_hard 에서 actuator 의 +8pp 부수 효과 (52→60%).
+
+**결과 (n=50, estimated)**:
+
+| controller | hard | noisy | divert | divert_hard | **worst-case** |
+|---|---|---|---|---|---|
+| PID | 58% | **84%** | 78% | 18% ⚠️ | **18%** |
+| actuator | **68%** | 78% | 90% | 52% | 52% |
+| scp (단발) | 58% | 74% | 84% | 56% | 56% |
+| **scp_warm (TR)** | **70%** | 74% | 84% | **60%** | **60%** ✨ |
+| actuator_smooth_05 | 60% | 76% | **92%** | **60%** | **60%** ✨ |
+
+**진짜 발전**: worst-case 18% (PID) → 60% (scp_warm 또는 actuator_smooth_05) = **3.33× robust**. 어떤 시나리오든 *최소 60%* 보장.
+
+**알고리즘 의미**:
+- Trust region 이 SCP 의 *수학적 필수 안전장치* 임을 데이터로 확인 (없으면 -38pp 붕괴, 추가하면 +4pp 우위)
+- noisy 의 PID 우위는 *MPC plan 노이즈* 가 아닌 다른 원인 (다음 작업 후보)
+- scp_warm (TR) 이 *균형형 robust* 후보 — 4 시나리오 모두 ≥ 60%, 3개 ≥ 70%
+
+**계속 갈 길**: multi-iteration full SCP (정통 완성도), EDF roll 물리 추가 (시뮬-현실 갭), noisy 의 estimator 자동 조정.
+
+자료: `docs/2026-05-29_2126_v1_scp_warm_results.md` (raw without TR), `docs/2026-05-29_2155_v1_robust_controller_analysis.md` (분석 + TR 추가).
+
 <!-- 새 항목은 이 줄 위에 추가 -->

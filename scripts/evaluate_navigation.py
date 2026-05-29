@@ -55,6 +55,15 @@ CONTROLLERS = (
     # First MPC that leaves the point-mass assumption.  Uses the same
     # lookahead=10 wrapper machinery as actuator / actuator2.
     "scp",
+    # Step 3 warm-start SCP: time-varying linearization around previous
+    # plan's attitude trajectory (one SCP iteration per replan).
+    "scp_warm",
+    # Noisy weakness sweep: actuator with EMA smoothing on xy waypoint
+    # to attenuate noise-driven replan jitter.
+    "actuator_smooth_05",
+    "actuator_smooth_07",
+    "scp_warm_smooth_05",
+    "scp_warm_smooth_07",
     # SpaceX-style time-indexed trajectory tracking variants — drop the
     # single-point lookahead in favor of plan-time-interpolated
     # (p_ref, v_ref, u_ff). See
@@ -114,6 +123,29 @@ def make_controller(name: str, env, plant_model: str):
     if name == "scp":
         from rocketsim.controllers import LandingScp6DofWaypointPID
         return LandingScp6DofWaypointPID(vehicle, env.world)
+    if name == "scp_warm":
+        from rocketsim.controllers import LandingScpWarm6DofWaypointPID
+        return LandingScpWarm6DofWaypointPID(vehicle, env.world)
+    if name == "actuator_smooth_05":
+        from rocketsim.controllers import LandingActuatorAwareWaypointPID
+        return LandingActuatorAwareWaypointPID(
+            vehicle, env.world, xy_ref_alpha=0.5
+        )
+    if name == "actuator_smooth_07":
+        from rocketsim.controllers import LandingActuatorAwareWaypointPID
+        return LandingActuatorAwareWaypointPID(
+            vehicle, env.world, xy_ref_alpha=0.7
+        )
+    if name == "scp_warm_smooth_05":
+        from rocketsim.controllers import LandingScpWarm6DofWaypointPID
+        return LandingScpWarm6DofWaypointPID(
+            vehicle, env.world, xy_ref_alpha=0.5
+        )
+    if name == "scp_warm_smooth_07":
+        from rocketsim.controllers import LandingScpWarm6DofWaypointPID
+        return LandingScpWarm6DofWaypointPID(
+            vehicle, env.world, xy_ref_alpha=0.7
+        )
     if name == "tracking_pointmass":
         from rocketsim.controllers import LandingPointMassTrackingMPC
         return LandingPointMassTrackingMPC(vehicle, env.world)
