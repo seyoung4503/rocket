@@ -229,7 +229,14 @@ class CvxpyPointMassMPC:
         horizon: float = 4.0,
         dt: float = 0.2,
         max_tilt: float = np.deg2rad(12.0),
+        du_max: float | None = 3.0,
     ):
+        # ``du_max`` (m/s^2 per step) caps how fast the planned thrust-acceleration
+        # vector may rotate/grow between steps. This makes the MPC actuator-aware:
+        # without it, the optimizer pays only a soft penalty for jumping the
+        # thrust direction and ends up planning slews the 6-DOF body cannot
+        # actually realize (diagnosis: gimbal saturates 87-94% of steps). Set to
+        # None to recover the original point-mass behavior.
         try:
             import cvxpy as cp
         except ImportError as exc:  # pragma: no cover - exercised by environment setup
@@ -278,6 +285,9 @@ class CvxpyPointMassMPC:
                 self.v[2, k] >= -4.0,
                 self.v[2, k] + 0.45 * self.p[2, k] >= -0.45,
             ]
+            if du_max is not None:
+                prev = self.prev_u if k == 0 else self.u[:, k - 1]
+                constraints += [cp.norm(self.u[:, k] - prev, 2) <= du_max]
             cost += cp.sum(cp.multiply(q_pos, cp.square(self.p[:, k])))
             cost += cp.sum(cp.multiply(q_vel, cp.square(self.v[:, k])))
             cost += r_u * cp.sum_squares(self.u[:, k] - self.hover_acc)
@@ -577,7 +587,14 @@ class LandingCvxpyWaypointPID:
         env: Environment,
         replan_dt: float = 0.2,
         max_tilt: float = np.deg2rad(20.0),
-        lookahead: int = 4,
+        # 2026-05-29 raised from 4 to 10 after divert-bug diagnostic.
+        # See docs/2026-05-29_<time>_v1_hover_bug_*.md.
+        # 4 (=0.8s ahead) lives in the slow early portion of the MPC plan
+        # and produces too timid an xy_target when divert pushes the pad
+        # 10m sideways. 10 (=2s ahead) gives a target ~halfway through the
+        # plan -- aggressive enough to recover, not so aggressive that PID
+        # over-tilts and triggers `too_high` (a failure mode of lookahead=19).
+        lookahead: int = 10,
         v_max: float = 3.5,
         v_min: float = 0.25,
         flare_gain: float = 0.45,
@@ -587,6 +604,14 @@ class LandingCvxpyWaypointPID:
         gate_alt: float = 2.5,
         tight_frac: float = 0.5,
         creep: float = 0.35,
+        # 2026-05-29 added.  EMA smoothing of the MPC's lookahead xy
+        # waypoint across consecutive replans.  At noisy estimated state,
+        # the MPC plan jitters between replans, and HoverPID's D term
+        # reacts to the jitter -- a small amount of smoothing trades a
+        # tiny lag for a meaningful drop in waypoint noise.  alpha = 1.0
+        # = no smoothing (backwards compatible default); alpha = 0.4
+        # means "30% of the new MPC waypoint, 70% of the previous one".
+        xy_ref_alpha: float = 1.0,
     ):
         self.vehicle = vehicle
         self.env = env
@@ -594,6 +619,7 @@ class LandingCvxpyWaypointPID:
         self.mpc = CvxpyPointMassMPC(vehicle, env, max_tilt=max_tilt)
         self.replan_dt = replan_dt
         self.lookahead = max(1, lookahead)
+        self.xy_ref_alpha = float(np.clip(xy_ref_alpha, 0.0, 1.0))
         self.guidance = LandingGuidance(
             LandingGuidanceConfig(
                 v_max=v_max,
@@ -619,7 +645,15 @@ class LandingCvxpyWaypointPID:
             if plan is not None:
                 p, _v, _u = plan
                 k = min(self.lookahead, p.shape[1] - 1)
-                self._xy_ref = p[:2, k]
+                new_ref = p[:2, k]
+                if self._has_plan and self.xy_ref_alpha < 1.0:
+                    # EMA between new MPC waypoint and previous one.
+                    self._xy_ref = (
+                        self.xy_ref_alpha * new_ref
+                        + (1.0 - self.xy_ref_alpha) * self._xy_ref
+                    )
+                else:
+                    self._xy_ref = new_ref
                 self._has_plan = True
 
         z = float(pos[2])
@@ -959,3 +993,488 @@ class LandingFullDynamicsMPC:
             gimbal_y=float(first[2]),
         )
         return self._last_cmd
+
+
+# ============================================================================
+# Step 1 of actuator-aware MPC (2026-05-29 v1).
+#
+# See docs/2026-05-29_0213_v1_hierarchical_mpc_plan.md for the design rationale
+# and the four caveats from the codex literature check that this class
+# explicitly addresses:
+#   1. slew is an EFFECTIVE JERK limit, not just the gimbal rate spec
+#   2. a slack variable absorbs infeasibility during disturbance recovery
+#   3. world-frame slew is still an APPROXIMATION of body attitude dynamics
+#   4. slew authority must scale with the current thrust magnitude
+# ============================================================================
+
+
+class CvxpyActuatorAwareMPC:
+    """Convex MPC that treats the thrust-acceleration VECTOR as a STATE with a
+    hard slew-rate constraint, so the planned trajectory is realizable by a
+    finite-bandwidth thrust vectoring system (i.e. the body can't rotate fast
+    enough to teleport the thrust direction).
+
+    Difference from ``CvxpyPointMassMPC``:
+      * ``u`` (world-frame thrust acceleration) is a STATE, not a control.
+      * The control is the RATE ``du`` with a hard SOC constraint.
+      * The slew bound is proportional to the current vertical thrust
+        (``||du[k]|| <= slew_factor * u[2,k] + slack[k]``), reflecting that
+        lateral acceleration authority is limited by thrust magnitude.
+      * A slack variable absorbs infeasibility under wind/disturbance gusts.
+
+    The interface (``plan(pos, vel, accel_bias=None)``) and return shape
+    (``(p, v, u)``) match ``CvxpyPointMassMPC`` so existing wrappers can
+    swap to this class without changes.
+    """
+
+    def __init__(
+        self,
+        vehicle: Vehicle,
+        env: Environment,
+        horizon: float = 4.0,
+        dt: float = 0.2,
+        max_tilt: float = np.deg2rad(12.0),
+        # Slew factor: ||du[k]|| <= slew_factor * u_z[k] + slack[k].
+        # At hover (u_z = g = 9.8 m/s^2), 0.6 gives ~5.9 m/s^2 of allowable
+        # thrust-vector change per dt=0.2s step, derived from an EDF-class
+        # effective jerk J_eff = (T/m) * achievable_omega ~ 9.8 * 3 rad/s.
+        slew_factor: float = 0.6,
+        slack_weight: float = 50.0,
+        # 2026-05-29 diagnostic showed gimbal sat 96% -> plan demands
+        # infeasible lateral motion. q_pos_xy / q_final_pos_xy parameterize the
+        # horizontal-tracking aggressiveness so we can sweep gentler weights.
+        q_pos_xy: float = 1.2,
+        q_final_pos_xy: float = 45.0,
+    ):
+        try:
+            import cvxpy as cp
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("cvxpy is required for CvxpyActuatorAwareMPC") from exc
+
+        self.cp = cp
+        self.vehicle = vehicle
+        self.env = env
+        self.dt = dt
+        self.n = max(2, int(round(horizon / dt)))
+        self.max_tilt = max_tilt
+        self.max_acc = vehicle.max_thrust / vehicle.mass
+        self.hover_acc = np.array([0.0, 0.0, env.gravity])
+        self.slew_factor = float(slew_factor)
+        self.slack_weight = float(slack_weight)
+        self._last_u = self.hover_acc.copy()
+
+        self.p0 = cp.Parameter(3)
+        self.v0 = cp.Parameter(3)
+        self.u0 = cp.Parameter(3, value=self.hover_acc)
+        self.accel_bias = cp.Parameter(3, value=np.zeros(3))
+
+        self.p = cp.Variable((3, self.n + 1))
+        self.v = cp.Variable((3, self.n + 1))
+        self.u = cp.Variable((3, self.n + 1))  # thrust accel as a STATE
+        self.du = cp.Variable((3, self.n))     # rate of change is the CONTROL
+        self.slack = cp.Variable(self.n, nonneg=True)
+
+        g = np.array([0.0, 0.0, -env.gravity])
+        tan_tilt = float(np.tan(max_tilt))
+
+        constraints = [
+            self.p[:, 0] == self.p0,
+            self.v[:, 0] == self.v0,
+            self.u[:, 0] == self.u0,
+        ]
+        cost = 0
+
+        q_pos = np.array([float(q_pos_xy), float(q_pos_xy), 0.08])
+        q_vel = np.array([4.0, 4.0, 3.0])
+        q_final_pos = np.array([float(q_final_pos_xy), float(q_final_pos_xy), 18.0])
+        q_final_vel = np.array([80.0, 80.0, 180.0])
+        r_u = 0.02
+        r_du = 0.05
+
+        for k in range(self.n):
+            acc = self.u[:, k] + g + self.accel_bias
+            constraints += [
+                # position/velocity dynamics
+                self.p[:, k + 1]
+                == self.p[:, k] + dt * self.v[:, k] + 0.5 * dt * dt * acc,
+                self.v[:, k + 1] == self.v[:, k] + dt * acc,
+                # thrust-vector dynamics: u evolves via its rate du
+                self.u[:, k + 1] == self.u[:, k] + dt * self.du[:, k],
+                # ground / one-sided thrust
+                self.p[2, k] >= 0.0,
+                self.u[2, k] >= 0.0,
+                # thrust magnitude + tilt cone
+                cp.norm(self.u[:, k], 2) <= self.max_acc,
+                cp.norm(self.u[:2, k], 2) <= tan_tilt * self.u[2, k],
+                # descent rate + glideslope (mirrors point-mass MPC)
+                self.v[2, k] >= -4.0,
+                self.v[2, k] + 0.45 * self.p[2, k] >= -0.45,
+                # ★ hard slew constraint with thrust-magnitude scaling + slack.
+                #   ||du[k]||_2 <= slew_factor * u_z[k] + slack[k]
+                #   This is a second-order cone constraint (convex).
+                cp.norm(self.du[:, k], 2)
+                <= self.slew_factor * self.u[2, k] + self.slack[k],
+            ]
+            cost += cp.sum(cp.multiply(q_pos, cp.square(self.p[:, k])))
+            cost += cp.sum(cp.multiply(q_vel, cp.square(self.v[:, k])))
+            cost += r_u * cp.sum_squares(self.u[:, k] - self.hover_acc)
+            cost += r_du * cp.sum_squares(self.du[:, k])
+
+        constraints += [
+            self.p[2, self.n] >= 0.0,
+            self.v[2, self.n] >= -0.35,
+            self.u[2, self.n] >= 0.0,
+            cp.norm(self.u[:, self.n], 2) <= self.max_acc,
+            cp.norm(self.u[:2, self.n], 2) <= tan_tilt * self.u[2, self.n],
+        ]
+        cost += cp.sum(cp.multiply(q_final_pos, cp.square(self.p[:, self.n])))
+        cost += cp.sum(cp.multiply(q_final_vel, cp.square(self.v[:, self.n])))
+        cost += self.slack_weight * cp.sum_squares(self.slack)
+
+        self.problem = cp.Problem(cp.Minimize(cost), constraints)
+
+    def plan(
+        self,
+        pos: np.ndarray,
+        vel: np.ndarray,
+        accel_bias: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        self.p0.value = np.asarray(pos, dtype=float)
+        self.v0.value = np.asarray(vel, dtype=float)
+        # Initial thrust-acceleration state: warm-started from the previous plan.
+        self.u0.value = np.asarray(self._last_u, dtype=float)
+        if accel_bias is None:
+            self.accel_bias.value = np.zeros(3)
+        else:
+            self.accel_bias.value = np.asarray(accel_bias, dtype=float)
+        try:
+            self.problem.solve(solver="CLARABEL", warm_start=True, verbose=False)
+        except Exception:
+            self.problem.solve(solver="SCS", warm_start=True, verbose=False, max_iters=500)
+
+        if self.problem.status not in ("optimal", "optimal_inaccurate") or self.u.value is None:
+            return None
+
+        u_traj = np.asarray(self.u.value, dtype=float)
+        if not np.all(np.isfinite(u_traj)):
+            return None
+        # Warm-start: next u0 is what we planned for time step 1.
+        self._last_u = u_traj[:, 1].copy() if u_traj.shape[1] > 1 else u_traj[:, 0].copy()
+        # Return the first n columns of u to match the point-mass MPC signature
+        # (control-shaped (3, n) so downstream wrappers don't have to change).
+        return (
+            np.asarray(self.p.value, dtype=float).copy(),
+            np.asarray(self.v.value, dtype=float).copy(),
+            u_traj[:, : self.n].copy(),
+        )
+
+    def acceleration(self, pos: np.ndarray, vel: np.ndarray) -> np.ndarray:
+        plan = self.plan(pos, vel)
+        if plan is None:
+            return self._last_u.copy()
+        _, _, u = plan
+        return np.asarray(u[:, 0], dtype=float).copy()
+
+
+# ============================================================================
+# Step 2 of actuator-aware MPC (2026-05-29 v1).
+#
+# Extends Step 1: the *vector slew* limit stays, but now thrust *magnitude*
+# is also a 1st-order lagged state matching the simulator's EDF spool-up
+# (``vehicle.thrust_time_constant``).  The plan is still a point-mass model;
+# Step 3 (SCP 6-DOF, separate class) is the first step that leaves point
+# mass entirely.  See docs/2026-05-29_0213_v1_hierarchical_mpc_plan.md.
+# ============================================================================
+
+
+class CvxpyActuatorAwareMagLagMPC:
+    """Step 2: Step 1 + thrust-magnitude 1st-order lag.
+
+    Adds two scalar quantities on top of ``CvxpyActuatorAwareMPC``:
+      * ``T[k]`` (state)   — actual thrust-accel magnitude.
+      * ``T_cmd[k]`` (control) — commanded magnitude, bounded ``[0, max_acc]``.
+    Dynamics: ``T[k+1] = a*T[k] + (1-a)*T_cmd[k]`` with
+    ``a = exp(-dt / tau_spool)`` (exact ZOH).  Default ``tau_spool`` reads
+    ``vehicle.thrust_time_constant`` so the MPC's internal lag matches the
+    simulator.
+
+    The Step-1 bound ``||u||_2 <= max_acc`` is replaced with the lossless-
+    convex relaxation ``||u||_2 <= T[k]``, with ``T_cmd`` driving ``T``.
+    Direction (tilt cone) and Step-1 slew constraints carry over unchanged.
+
+    Still point-mass (no attitude state); Step 3 is the structural fix.
+    """
+
+    def __init__(
+        self,
+        vehicle: Vehicle,
+        env: Environment,
+        horizon: float = 4.0,
+        dt: float = 0.2,
+        max_tilt: float = np.deg2rad(12.0),
+        slew_factor: float = 0.9,
+        slack_weight: float = 50.0,
+        q_pos_xy: float = 1.2,
+        q_final_pos_xy: float = 45.0,
+        # EDF spool-up lag time constant. ``None`` -> read vehicle attribute so
+        # the internal lag matches the simulator's actual lag.
+        tau_spool: float | None = None,
+        # Effort cost on commanded magnitude, nudging T_cmd toward hover.
+        # Same magnitude as r_u (0.02). Needed so the lossless-convex
+        # relaxation ||u||<=T doesn't park T at an arbitrarily large value.
+        r_Tcmd: float = 0.02,
+    ):
+        try:
+            import cvxpy as cp
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "cvxpy is required for CvxpyActuatorAwareMagLagMPC"
+            ) from exc
+
+        self.cp = cp
+        self.vehicle = vehicle
+        self.env = env
+        self.dt = dt
+        self.n = max(2, int(round(horizon / dt)))
+        self.max_tilt = max_tilt
+        self.max_acc = vehicle.max_thrust / vehicle.mass
+        self.hover_acc = np.array([0.0, 0.0, env.gravity])
+        self.hover_mag = float(env.gravity)
+        self.slew_factor = float(slew_factor)
+        self.slack_weight = float(slack_weight)
+        self.tau_spool = float(
+            tau_spool if tau_spool is not None
+            else getattr(vehicle, "thrust_time_constant", 0.08)
+        )
+        self._lag_a = float(np.exp(-self.dt / self.tau_spool))
+        self.r_Tcmd = float(r_Tcmd)
+
+        self._last_u = self.hover_acc.copy()
+        self._last_T = self.hover_mag
+
+        self.p0 = cp.Parameter(3)
+        self.v0 = cp.Parameter(3)
+        self.u0 = cp.Parameter(3, value=self.hover_acc)
+        self.T0 = cp.Parameter(value=self.hover_mag, nonneg=True)
+        self.accel_bias = cp.Parameter(3, value=np.zeros(3))
+
+        self.p = cp.Variable((3, self.n + 1))
+        self.v = cp.Variable((3, self.n + 1))
+        self.u = cp.Variable((3, self.n + 1))            # thrust accel (state)
+        self.du = cp.Variable((3, self.n))               # thrust-accel rate
+        self.T = cp.Variable(self.n + 1, nonneg=True)    # thrust-mag state
+        self.T_cmd = cp.Variable(self.n, nonneg=True)    # thrust-mag control
+        self.slack = cp.Variable(self.n, nonneg=True)
+
+        g = np.array([0.0, 0.0, -env.gravity])
+        tan_tilt = float(np.tan(max_tilt))
+        a = self._lag_a
+
+        constraints = [
+            self.p[:, 0] == self.p0,
+            self.v[:, 0] == self.v0,
+            self.u[:, 0] == self.u0,
+            self.T[0] == self.T0,
+        ]
+        cost = 0
+
+        q_pos = np.array([float(q_pos_xy), float(q_pos_xy), 0.08])
+        q_vel = np.array([4.0, 4.0, 3.0])
+        q_final_pos = np.array(
+            [float(q_final_pos_xy), float(q_final_pos_xy), 18.0]
+        )
+        q_final_vel = np.array([80.0, 80.0, 180.0])
+        r_u = 0.02
+        r_du = 0.05
+
+        for k in range(self.n):
+            acc = self.u[:, k] + g + self.accel_bias
+            constraints += [
+                # position/velocity dynamics
+                self.p[:, k + 1]
+                == self.p[:, k] + dt * self.v[:, k] + 0.5 * dt * dt * acc,
+                self.v[:, k + 1] == self.v[:, k] + dt * acc,
+                # thrust-vector dynamics: u evolves via its rate du (Step 1)
+                self.u[:, k + 1] == self.u[:, k] + dt * self.du[:, k],
+                # ★ thrust-magnitude 1st-order lag (Step 2 addition)
+                #   T[k+1] = a*T[k] + (1-a)*T_cmd[k]   (exact ZOH)
+                self.T[k + 1]
+                == a * self.T[k] + (1.0 - a) * self.T_cmd[k],
+                # commanded-magnitude upper bound (T_cmd >= 0 via nonneg flag)
+                self.T_cmd[k] <= self.max_acc,
+                # ground / one-sided thrust
+                self.p[2, k] >= 0.0,
+                self.u[2, k] >= 0.0,
+                # ★ thrust-vector magnitude bounded by lagged actual T
+                #   (lossless-convex relaxation à la Açıkmeşe G-FOLD)
+                cp.norm(self.u[:, k], 2) <= self.T[k],
+                # tilt cone (gimbal direction limit)
+                cp.norm(self.u[:2, k], 2) <= tan_tilt * self.u[2, k],
+                # descent rate + glideslope (mirrors point-mass MPC)
+                self.v[2, k] >= -4.0,
+                self.v[2, k] + 0.45 * self.p[2, k] >= -0.45,
+                # Step 1 slew on thrust-vector rate
+                cp.norm(self.du[:, k], 2)
+                <= self.slew_factor * self.u[2, k] + self.slack[k],
+            ]
+            cost += cp.sum(cp.multiply(q_pos, cp.square(self.p[:, k])))
+            cost += cp.sum(cp.multiply(q_vel, cp.square(self.v[:, k])))
+            cost += r_u * cp.sum_squares(self.u[:, k] - self.hover_acc)
+            cost += r_du * cp.sum_squares(self.du[:, k])
+            cost += self.r_Tcmd * cp.square(self.T_cmd[k] - self.hover_mag)
+
+        constraints += [
+            self.p[2, self.n] >= 0.0,
+            self.v[2, self.n] >= -0.35,
+            self.u[2, self.n] >= 0.0,
+            cp.norm(self.u[:, self.n], 2) <= self.T[self.n],
+            cp.norm(self.u[:2, self.n], 2) <= tan_tilt * self.u[2, self.n],
+        ]
+        cost += cp.sum(cp.multiply(q_final_pos, cp.square(self.p[:, self.n])))
+        cost += cp.sum(cp.multiply(q_final_vel, cp.square(self.v[:, self.n])))
+        cost += self.slack_weight * cp.sum_squares(self.slack)
+
+        self.problem = cp.Problem(cp.Minimize(cost), constraints)
+
+    def plan(
+        self,
+        pos: np.ndarray,
+        vel: np.ndarray,
+        accel_bias: np.ndarray | None = None,
+        thrust_mag: float | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        self.p0.value = np.asarray(pos, dtype=float)
+        self.v0.value = np.asarray(vel, dtype=float)
+        self.u0.value = np.asarray(self._last_u, dtype=float)
+        if thrust_mag is None:
+            self.T0.value = float(self._last_T)
+        else:
+            self.T0.value = float(np.clip(thrust_mag, 1e-6, self.max_acc))
+        if accel_bias is None:
+            self.accel_bias.value = np.zeros(3)
+        else:
+            self.accel_bias.value = np.asarray(accel_bias, dtype=float)
+        try:
+            self.problem.solve(solver="CLARABEL", warm_start=True, verbose=False)
+        except Exception:
+            self.problem.solve(
+                solver="SCS", warm_start=True, verbose=False, max_iters=500
+            )
+
+        if (
+            self.problem.status not in ("optimal", "optimal_inaccurate")
+            or self.u.value is None
+        ):
+            return None
+
+        u_traj = np.asarray(self.u.value, dtype=float)
+        T_traj = np.asarray(self.T.value, dtype=float)
+        if not np.all(np.isfinite(u_traj)) or not np.all(np.isfinite(T_traj)):
+            return None
+        # Warm-start the next call from what we planned for step 1.
+        self._last_u = (
+            u_traj[:, 1].copy() if u_traj.shape[1] > 1 else u_traj[:, 0].copy()
+        )
+        self._last_T = (
+            float(T_traj[1]) if T_traj.shape[0] > 1 else float(T_traj[0])
+        )
+        return (
+            np.asarray(self.p.value, dtype=float).copy(),
+            np.asarray(self.v.value, dtype=float).copy(),
+            u_traj[:, : self.n].copy(),
+        )
+
+    def acceleration(self, pos: np.ndarray, vel: np.ndarray) -> np.ndarray:
+        plan = self.plan(pos, vel)
+        if plan is None:
+            return self._last_u.copy()
+        _, _, u = plan
+        return np.asarray(u[:, 0], dtype=float).copy()
+
+
+class LandingActuatorAwareMagLagWaypointPID(LandingCvxpyWaypointPID):
+    """Step 2 sibling of ``LandingActuatorAwareWaypointPID``: same waypoint /
+    PID landing gate / HoverPID tracking, but the underlying MPC is the Step 2
+    magnitude-lag variant."""
+
+    def __init__(
+        self,
+        vehicle: Vehicle,
+        env: Environment,
+        replan_dt: float = 0.2,
+        max_tilt: float = np.deg2rad(20.0),
+        lookahead: int = 10,  # see LandingCvxpyWaypointPID for rationale
+        slew_factor: float = 0.9,
+        slack_weight: float = 50.0,
+        q_pos_xy: float = 1.2,
+        q_final_pos_xy: float = 45.0,
+        tau_spool: float | None = None,
+        r_Tcmd: float = 0.02,
+        **gate_kwargs,
+    ):
+        super().__init__(
+            vehicle,
+            env,
+            replan_dt=replan_dt,
+            max_tilt=max_tilt,
+            lookahead=lookahead,
+            **gate_kwargs,
+        )
+        self.mpc = CvxpyActuatorAwareMagLagMPC(
+            vehicle,
+            env,
+            max_tilt=np.deg2rad(12.0),
+            slew_factor=slew_factor,
+            slack_weight=slack_weight,
+            q_pos_xy=q_pos_xy,
+            q_final_pos_xy=q_final_pos_xy,
+            tau_spool=tau_spool,
+            r_Tcmd=r_Tcmd,
+        )
+
+
+class LandingActuatorAwareWaypointPID(LandingCvxpyWaypointPID):
+    """Step 1 sibling of ``LandingCvxpyWaypointPID`` that uses the
+    actuator-aware (slew-limited) MPC underneath. Everything else (the PID
+    landing gate, HoverPID tracking, vertical commit logic) is identical, so
+    the only A/B difference is the underlying MPC model."""
+
+    def __init__(
+        self,
+        vehicle: Vehicle,
+        env: Environment,
+        replan_dt: float = 0.2,
+        max_tilt: float = np.deg2rad(20.0),
+        lookahead: int = 10,  # see LandingCvxpyWaypointPID for rationale
+        # 2026-05-29 bumped 0.6 -> 0.9: the n=50 sweep with 0.6 (46% hard,
+        # 74% noisy) showed the MPC was too conservative — its plan was too
+        # sluggish to catch wind disturbances. Higher beta = less conservative.
+        slew_factor: float = 0.9,
+        slack_weight: float = 50.0,
+        # Horizontal tracking aggressiveness — see CvxpyActuatorAwareMPC.
+        # Defaults match the original (aggressive) weights; A/B variants in
+        # evaluate_navigation pass softer values.
+        q_pos_xy: float = 1.2,
+        q_final_pos_xy: float = 45.0,
+        **gate_kwargs,
+    ):
+        super().__init__(
+            vehicle,
+            env,
+            replan_dt=replan_dt,
+            max_tilt=max_tilt,
+            lookahead=lookahead,
+            **gate_kwargs,
+        )
+        # Swap to the actuator-aware MPC. The MPC's max_tilt should match the
+        # cone tilt used for waypoint generation, not the controller's overall
+        # tilt budget; keep it at the 12° gimbal cone like the point-mass MPC.
+        self.mpc = CvxpyActuatorAwareMPC(
+            vehicle,
+            env,
+            max_tilt=np.deg2rad(12.0),
+            slew_factor=slew_factor,
+            slack_weight=slack_weight,
+            q_pos_xy=q_pos_xy,
+            q_final_pos_xy=q_final_pos_xy,
+        )

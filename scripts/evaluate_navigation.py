@@ -40,7 +40,53 @@ from rocketsim.navigation import LowPassStateEstimator  # noqa: E402
 from rocketsim.navigation.estimator import LowPassEstimatorConfig  # noqa: E402
 
 
-CONTROLLERS = ("pid", "vertical", "cvxpy", "guidance", "waypoint", "feasible", "full")
+CONTROLLERS = (
+    "pid", "vertical", "cvxpy", "guidance", "waypoint", "feasible", "full",
+    "actuator",  # Step 1 actuator-aware MPC + PID waypoint (2026-05-29 v1)
+    # A/B sweep on horizontal-tracking aggressiveness in the actuator-aware MPC
+    # (q_pos[xy] / q_final_pos[xy]). Default is 1.2 / 45 which causes ~96%
+    # gimbal saturation; A and B relax those weights 4x / 8x respectively.
+    "actuator_a",
+    "actuator_b",
+    # Step 2: Step 1 + thrust-magnitude 1st-order lag matching the EDF
+    # spool-up tau (vehicle.thrust_time_constant). Still point-mass.
+    "actuator2",
+    # Step 3: linearized 6-DOF MPC — attitude φ + body ω as states.
+    # First MPC that leaves the point-mass assumption.  Uses the same
+    # lookahead=10 wrapper machinery as actuator / actuator2.
+    "scp",
+    # Step 3 warm-start SCP: time-varying linearization around previous
+    # plan's attitude trajectory (one SCP iteration per replan).
+    "scp_warm",
+    # Step 3 full SCP: multi-iteration solver (3 inner iterations).
+    "scp_full",
+    # Noisy weakness sweep: actuator with EMA smoothing on xy waypoint
+    # to attenuate noise-driven replan jitter.
+    "actuator_smooth_05",
+    "actuator_smooth_07",
+    "scp_warm_smooth_05",
+    "scp_warm_smooth_07",
+    # SpaceX-style time-indexed trajectory tracking variants — drop the
+    # single-point lookahead in favor of plan-time-interpolated
+    # (p_ref, v_ref, u_ff). See
+    # docs/2026-05-29_1653_v1_lookahead_vs_spacex_design.md.
+    "tracking_pointmass",
+    "tracking_actuator",
+    "tracking_actuator2",
+    # Full SpaceX-style: bare tracker + position integrator + landing gate
+    # + touchdown commit. See trajectory_tracker.LandingTrajectoryTrackingFullMPC.
+    "full_pointmass",
+    "full_actuator",
+    "full_actuator2",
+    # Proper SpaceX-style stack built from scratch in src/rocketsim/spacex:
+    # min-fuel convex MPC + glideslope + shrinking horizon + time-indexed
+    # PD+I tracker. See docs/2026-05-29_1753_v1_spacex_style_design.md.
+    "spacex",
+    # SpaceX stack with Step 1 (slew) / Step 1+2 (slew + thrust-mag lag)
+    # actuator-aware constraints ported into the convex landing MPC.
+    "spacex_actuator",
+    "spacex_actuator2",
+)
 MODES = ("true", "measured", "estimated")
 
 
@@ -60,6 +106,88 @@ def make_controller(name: str, env, plant_model: str):
         return LandingFeasibleWaypointMPC(vehicle, env.world)
     if name == "full":
         return LandingFullDynamicsMPC(vehicle, env.world)
+    if name == "actuator":
+        from rocketsim.controllers import LandingActuatorAwareWaypointPID
+        return LandingActuatorAwareWaypointPID(vehicle, env.world)
+    if name == "actuator_a":
+        from rocketsim.controllers import LandingActuatorAwareWaypointPID
+        return LandingActuatorAwareWaypointPID(
+            vehicle, env.world, q_pos_xy=0.3, q_final_pos_xy=15.0
+        )
+    if name == "actuator_b":
+        from rocketsim.controllers import LandingActuatorAwareWaypointPID
+        return LandingActuatorAwareWaypointPID(
+            vehicle, env.world, q_pos_xy=0.15, q_final_pos_xy=8.0
+        )
+    if name == "actuator2":
+        from rocketsim.controllers import LandingActuatorAwareMagLagWaypointPID
+        return LandingActuatorAwareMagLagWaypointPID(vehicle, env.world)
+    if name == "scp":
+        from rocketsim.controllers import LandingScp6DofWaypointPID
+        return LandingScp6DofWaypointPID(vehicle, env.world)
+    if name == "scp_warm":
+        from rocketsim.controllers import LandingScpWarm6DofWaypointPID
+        return LandingScpWarm6DofWaypointPID(vehicle, env.world)
+    if name == "scp_full":
+        from rocketsim.controllers import LandingScpFull6DofWaypointPID
+        return LandingScpFull6DofWaypointPID(vehicle, env.world)
+    if name == "actuator_smooth_05":
+        from rocketsim.controllers import LandingActuatorAwareWaypointPID
+        return LandingActuatorAwareWaypointPID(
+            vehicle, env.world, xy_ref_alpha=0.5
+        )
+    if name == "actuator_smooth_07":
+        from rocketsim.controllers import LandingActuatorAwareWaypointPID
+        return LandingActuatorAwareWaypointPID(
+            vehicle, env.world, xy_ref_alpha=0.7
+        )
+    if name == "scp_warm_smooth_05":
+        from rocketsim.controllers import LandingScpWarm6DofWaypointPID
+        return LandingScpWarm6DofWaypointPID(
+            vehicle, env.world, xy_ref_alpha=0.5
+        )
+    if name == "scp_warm_smooth_07":
+        from rocketsim.controllers import LandingScpWarm6DofWaypointPID
+        return LandingScpWarm6DofWaypointPID(
+            vehicle, env.world, xy_ref_alpha=0.7
+        )
+    if name == "tracking_pointmass":
+        from rocketsim.controllers import LandingPointMassTrackingMPC
+        return LandingPointMassTrackingMPC(vehicle, env.world)
+    if name == "tracking_actuator":
+        from rocketsim.controllers import LandingActuatorTrackingMPC
+        return LandingActuatorTrackingMPC(vehicle, env.world)
+    if name == "tracking_actuator2":
+        from rocketsim.controllers import LandingActuatorMagLagTrackingMPC
+        return LandingActuatorMagLagTrackingMPC(vehicle, env.world)
+    if name == "full_pointmass":
+        from rocketsim.controllers import LandingPointMassTrackingFullMPC
+        return LandingPointMassTrackingFullMPC(vehicle, env.world)
+    if name == "full_actuator":
+        from rocketsim.controllers import LandingActuatorTrackingFullMPC
+        return LandingActuatorTrackingFullMPC(vehicle, env.world)
+    if name == "full_actuator2":
+        from rocketsim.controllers import LandingActuatorMagLagTrackingFullMPC
+        return LandingActuatorMagLagTrackingFullMPC(vehicle, env.world)
+    if name == "spacex":
+        from rocketsim.spacex import LandingControllerSpaceX
+        return LandingControllerSpaceX(vehicle, env.world)
+    if name == "spacex_actuator":
+        from rocketsim.spacex import (
+            ActuatorAwareLandingMPC,
+            LandingControllerSpaceX,
+        )
+        return LandingControllerSpaceX(
+            vehicle, env.world, planner_cls=ActuatorAwareLandingMPC
+        )
+    if name == "spacex_actuator2":
+        from rocketsim.spacex import (
+            ActuatorMagLagLandingMPC,
+            LandingControllerSpaceX,
+        )
+        return LandingControllerSpaceX(
+            vehicle, env.world, planner_cls=ActuatorMagLagLandingMPC
+        )
     raise ValueError(f"unknown controller: {name}")
 
 
@@ -74,8 +202,118 @@ def summarize_touchdown(env):
     }
 
 
-def eval_mode(difficulty: str, controller_name: str, mode: str, n: int, plant_model: str):
-    env = make_landing_env(difficulty)
+def _run_one_episode(args):
+    """Top-level worker function for ProcessPoolExecutor (must be picklable).
+
+    Each call constructs a FRESH env/controller/estimator inside the worker
+    process, runs one episode, and returns a small dict. All work is local to
+    the worker, so episodes can run in true parallel across CPU cores.
+    """
+    ep, difficulty, controller_name, mode, plant_model, edf_roll, edf_roll_scale = args
+    env = make_landing_env(
+        difficulty, edf_roll=edf_roll, edf_roll_scale=edf_roll_scale
+    )
+    env.reset(seed=ep)
+    ctrl = make_controller(controller_name, env, plant_model)
+    estimator = LowPassStateEstimator(
+        LowPassEstimatorConfig.for_obs_noise(getattr(env, "obs_noise", 0.0))
+    )
+    est = estimator.reset(env.measured)
+
+    done = False
+    ep_energy = 0.0
+    while not done:
+        if mode == "true":
+            ctrl_state = env.state
+        elif mode == "measured":
+            ctrl_state = env.measured
+        elif mode == "estimated":
+            ctrl_state = est
+        else:
+            raise ValueError(f"unknown mode: {mode}")
+        cmd = ctrl(env.t, ctrl_state)
+        ep_energy += cmd.throttle * env.control_dt
+        _, _, term, trunc, info = env.step(env.command_to_action(cmd))
+        if mode == "estimated":
+            est = estimator.update(env.measured, env.control_dt)
+        done = term or trunc
+
+    reason = info.get("reason", "")
+    out = {
+        "ep": ep,
+        "reason": reason,
+        "success": bool(info.get("success", False)),
+        "energy": ep_energy,
+        "touchdown": summarize_touchdown(env) if reason == "touchdown" else None,
+    }
+    return out
+
+
+def _aggregate_results(results, env_for_thresholds):
+    """Combine per-episode dicts into the shape eval_mode used to return."""
+    succ = 0
+    landed = 0
+    reasons: dict[str, int] = {}
+    fail = {"offset": 0, "vspeed": 0, "hspeed": 0, "tilt": 0}
+    touchdown = []
+    energy = []
+    sc = env_for_thresholds.scenario
+    for r in sorted(results, key=lambda d: d["ep"]):
+        reason = r["reason"]
+        reasons[reason] = reasons.get(reason, 0) + 1
+        succ += int(r["success"])
+        energy.append(r["energy"])
+        if reason == "touchdown" and r["touchdown"] is not None:
+            landed += 1
+            metrics = r["touchdown"]
+            touchdown.append(metrics)
+            if not r["success"]:
+                if metrics["offset"] > sc.max_touchdown_offset:
+                    fail["offset"] += 1
+                if metrics["vspeed"] > sc.max_touchdown_vspeed:
+                    fail["vspeed"] += 1
+                if metrics["hspeed"] > sc.max_touchdown_hspeed:
+                    fail["hspeed"] += 1
+                if metrics["tilt"] > sc.max_touchdown_tilt_deg:
+                    fail["tilt"] += 1
+    return {
+        "success": succ,
+        "landed": landed,
+        "reasons": reasons,
+        "fail": fail,
+        "touchdown": touchdown,
+        "energy": energy,
+    }
+
+
+def eval_mode(
+    difficulty: str,
+    controller_name: str,
+    mode: str,
+    n: int,
+    plant_model: str,
+    n_workers: int = 1,
+    edf_roll: bool = False,
+    edf_roll_scale: float = 1.0,
+):
+    if n_workers > 1:
+        from concurrent.futures import ProcessPoolExecutor
+
+        args_list = [
+            (ep, difficulty, controller_name, mode, plant_model, edf_roll, edf_roll_scale)
+            for ep in range(n)
+        ]
+        with ProcessPoolExecutor(max_workers=n_workers) as ex:
+            results = list(ex.map(_run_one_episode, args_list, chunksize=1))
+        env_ref = make_landing_env(
+            difficulty, edf_roll=edf_roll, edf_roll_scale=edf_roll_scale
+        )
+        env_ref.reset(seed=0)
+        return _aggregate_results(results, env_ref)
+
+    env = make_landing_env(
+        difficulty, edf_roll=edf_roll, edf_roll_scale=edf_roll_scale
+    )
     succ = 0
     landed = 0
     reasons: dict[str, int] = {}
@@ -273,7 +511,10 @@ def main() -> int:
     ap.add_argument(
         "--difficulty",
         default="noisy",
-        choices=["calm", "moderate", "hard", "unknown", "recovery", "noisy"],
+        choices=[
+            "calm", "moderate", "hard", "unknown", "recovery", "noisy",
+            "divert", "divert_hard",
+        ],
         help="single difficulty; kept for compatibility",
     )
     ap.add_argument(
@@ -300,6 +541,25 @@ def main() -> int:
         help="comma-separated: true, measured, estimated",
     )
     ap.add_argument("--output", default=None, help="optional markdown output path")
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="number of parallel worker processes (1 = sequential)",
+    )
+    ap.add_argument(
+        "--edf-roll",
+        action="store_true",
+        help="enable EDF fan reaction torque + gyroscopic precession "
+             "(see docs/2026-05-29_2108_v1_edf_roll_physics_design.md)",
+    )
+    ap.add_argument(
+        "--edf-roll-scale",
+        type=float,
+        default=1.0,
+        help="scale factor on EDF roll torque/inertia (1.0 = single fan, "
+             "0.1 = ~90 percent cancelled by counter-rotating fan)",
+    )
     args = ap.parse_args()
 
     difficulties = (
@@ -334,6 +594,9 @@ def main() -> int:
                     mode,
                     args.episodes,
                     args.plant_model,
+                    n_workers=args.workers,
+                    edf_roll=args.edf_roll,
+                    edf_roll_scale=args.edf_roll_scale,
                 )
                 print_result(mode, result, args.episodes)
                 records.append(

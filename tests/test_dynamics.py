@@ -59,6 +59,50 @@ def test_quaternion_stays_unit():
     assert abs(np.linalg.norm(s[dyn.QUAT]) - 1.0) < 1e-6
 
 
+def test_edf_roll_off_means_zero_body_z_torque():
+    """Default vehicle has no EDF roll physics; body-z torque is zero
+    regardless of gimbal command."""
+    v, env = edf_testbed(), Environment()
+    assert v.edf_roll_coeff == 0.0
+    s = dyn.initial_state(thrust=v.mass * env.gravity)
+    hover = v.mass * env.gravity / v.max_thrust
+    cmd = np.array([hover, 0.1, 0.05])  # nonzero gimbals
+    d = dyn.state_derivative(s, cmd, v, env)
+    # OMEGA derivative z component should be zero.
+    assert abs(d[dyn.OMEGA][2]) < 1e-9
+
+
+def test_edf_roll_on_produces_reaction_torque():
+    """With edf_roll_coeff > 0 the body experiences a roll torque
+    proportional to thrust, even with zero gimbal."""
+    v, env = edf_testbed(), Environment()
+    v.edf_roll_coeff = 0.012
+    s = dyn.initial_state(thrust=v.mass * env.gravity)
+    hover = v.mass * env.gravity / v.max_thrust
+    cmd = np.array([hover, 0.0, 0.0])
+    d = dyn.state_derivative(s, cmd, v, env)
+    # Expected body-z angular acceleration: -roll_coeff * thrust / I_zz.
+    expected = -0.012 * v.mass * env.gravity / v.inertia[2, 2]
+    assert np.isclose(d[dyn.OMEGA][2], expected, rtol=1e-6)
+
+
+def test_edf_fan_gyro_couples_yaw_and_pitch():
+    """With fan_inertia and fan_omega_max set, a pitch rate couples
+    into a yaw torque (gyroscopic precession)."""
+    v, env = edf_testbed(), Environment()
+    v.edf_fan_inertia = 1e-4
+    v.edf_fan_omega_max = 4000.0
+    # Start with a pitch rate (about body x) and zero everything else.
+    s = dyn.initial_state(thrust=v.mass * env.gravity)
+    s[dyn.OMEGA] = np.array([0.5, 0.0, 0.0])  # rad/s about body x
+    hover = v.mass * env.gravity / v.max_thrust
+    cmd = np.array([hover, 0.0, 0.0])
+    d = dyn.state_derivative(s, cmd, v, env)
+    # tau_gyro = -omega × H = -(omega_x, 0, 0) × (0, 0, H_z) = (0, omega_x*H_z, 0)
+    # So omega_y dot is positive when omega_x is positive and H_z > 0.
+    assert d[dyn.OMEGA][1] > 0.0
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

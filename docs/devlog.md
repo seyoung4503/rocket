@@ -5,6 +5,24 @@
 
 ---
 
+## 2026-05-29 17:04 (KST) — 음속 돌파/형상/EDF 한계 추가 반영
+
+**문서 반영**
+- [docs/2026-05-29_0248_v1_formulas_and_algorithms.md](2026-05-29_0248_v1_formulas_and_algorithms.md)에 추가사항 섹션 작성.
+  - 마하 1 근처 동압/항력 식.
+  - 천음속 drag rise, 충격파, CP-CG, 노즈콘, 핀, flutter, inlet 문제.
+  - EDF가 저속 GNC 연습용이고 마하 1 추진체로는 부적합하다는 분리 원칙.
+- [docs/hardware.md](hardware.md)에 Phase 3 추가사항 작성.
+  - 음속 돌파용 형상 체크리스트.
+  - EDF 한계 표.
+  - `EDF = 저속 TVC/GNC/착륙 연습용`, `마하 1 = 별도 고속 비행체 설계 문제`로 명시.
+
+**의사결정**
+- 현재 EDF 착륙 시뮬레이션은 유지한다. 이 실험은 저속 GNC/착륙 제어 검증용으로 유효하다.
+- 마하 1 목표는 같은 기체/같은 EDF 추진체의 자연 확장이 아니라, 별도 공력·구조·추진 트랙으로 분리한다.
+
+---
+
 ## 2026-05-27 11:55 (KST) — 프로젝트 킥오프 & 6-DOF 시뮬레이터 + PID 호버 베이스라인
 
 **목표 정리 / 의사결정**
@@ -330,5 +348,264 @@ RL 트랙 1차 마무리. RL이 *이기는* 영역(모델 미지·곡예기동)�
 | PID + EKF @ noisy (2× noise) | 85% | **85%** (유지) |
 
 → 비대칭 손실 없이 GNC 스택이 모든 영역에서 PID 단독을 *능가하거나 동률*. 노이즈에선 RL(67%)도 명확히 능가(85%). **미니 SpaceX 1차 베이스라인 확정.**
+
+## 2026-05-29 14:26 (KST) — Actuator-aware MPC A/B 가중치 sweep: 가설 반증
+
+**가설**: actuator-aware MPC가 짐벌 96% 포화시키는 원인이 `q_pos[xy]=1.2` / `q_final_pos[xy]=45` 가중치가 너무 공격적이라서다. 완화하면 짐벌 포화 줄고 성공률 오를 것.
+
+**검정**: `q_pos[xy]`를 0.3 (A), 0.15 (B)로 4×/8× 완화. n=50 estimated 병렬(`--workers 6`), hard·noisy 모두 측정.
+
+| controller   | hard | noisy | noisy timeout |
+|--------------|------|-------|---------------|
+| pid          | 58%  | 84%   | 0             |
+| waypoint     | 52%  | 76%   | 3             |
+| actuator     | 46%  | 74%   | 8             |
+| actuator_a   | 46%  | 64%   | 10            |
+| actuator_b   | 44%  | 58%   | 12            |
+
+**결과**: 가중치 완화 방향으로 **단조 악화**. noisy 성공률 74→64→58%, timeout 8→10→12. 가설 반증.
+
+**재해석**: 짐벌 포화는 비용 가중치 탓이 아니라 **점질량 모델 자체의 한계**. 점질량은 짐벌 회전 lag을 모르고 "즉시 횡가속"을 자유롭게 가정 → 외란이 들어오면 항상 강한 횡가속 명령 → 실제 자세 동역학은 한 박자 늦음 → 짐벌 풀로 일해도 못 따라감. 가중치를 낮추면 MPC가 덜 공격적으로 짜는 만큼 패드 도달 자체에 실패 (timeout↑).
+
+**다음**: 다음 변형을 더 굴리는 것보다 **Step 2 (1차 자세 lag을 MPC 모델에 추가)** 로 가는 ROI가 크다는 결론. 자료: `docs/2026-05-29_1422_v1_actuator_ab_sweep.md` (raw), `docs/2026-05-29_1426_v1_actuator_ab_analysis.md` (분석·가설 위조 노트).
+
+## 2026-05-29 15:30 (KST) — Step 2 (추력 크기 1차 지연) 추가: 개선됐지만 부족
+
+**변경**: `CvxpyActuatorAwareMagLagMPC` + 래퍼 `LandingActuatorAwareMagLagWaypointPID` 추가. Step 1 (슬루 제약) 위에 ① 추력 크기 1차 지연 (`T[k+1] = a·T[k] + (1−a)·T_cmd[k]`, `a = exp(−dt/τ_spool) ≈ 0.082`, τ는 `vehicle.thrust_time_constant`=0.08s 와 매칭), ② 무손실 볼록 완화 `||u||₂ ≤ T[k]` (Açıkmeşe G-FOLD), ③ 비용 `r_Tcmd·(T_cmd−g)²` 로 hover 근처로 끌어당김. **여전히 점질량**. Step 3 이 점질량을 떠나는 첫 단계.
+
+**결과 (n=50, estimated)**:
+
+| controller | hard | noisy |
+|---|---|---|
+| pid | 58% | **84%** |
+| waypoint | 52% | 76% |
+| actuator (S1) | 46% | 74% |
+| **actuator2 (S2)** | **54%** | **80%** |
+
+Step 1 → Step 2 **hard +8pp, noisy +6pp**. 모든 landed_fail 카테고리에서 호전.
+
+**오픈루프 진단 (`diagnose_mpc_model_mismatch.py`, n=20)**: 짐벌 포화 88~96% — *전혀 변동 없음*. 즉 Step 2 의 개선은 *계획이 더 실현 가능해졌기 때문이 아니라* `r_Tcmd` + lag 가 *참조 신호를 부드럽게* 만들어 PID 가 더 잘 따라간 효과로 해석.
+
+**계획 §8 결정 기준**:
+- 짐벌 포화 ≤ 30% ❌ (88~96%)
+- PID 능가 ❌ (-4pp)
+→ **Step 3 (SCP 6-DOF) 로 진행이 정답.**
+
+자료: `docs/2026-05-29_1514_v1_step2_maglag_results.md` (raw), `docs/2026-05-29_1530_v1_step2_maglag_analysis.md` (분석).
+
+## 2026-05-29 15:50 (KST) — divert 시나리오 추가 + baseline: PID/MPC 가 시나리오마다 *반대* 로 실패
+
+**동기**: Step 1·2 가 hard/noisy 에서 PID 못 이긴 게 *MPC 가 못 한다* 인지 *시나리오가 PID-favorable* 인지 불분명. 저고도 유지 + 실제 hop 시나리오 가까이 + 위 두 변형 (Step 1 vs Step 2 vs Step 3) 의 차이를 부각시키기 위해 **`divert`** (moderate IC + t=2s 에 패드 +10m 이동) 와 **`divert_hard`** (hard IC + 같은 이동) 추가. 구현: `LandingScenario.pad_shift_time/pad_shift_delta_xy`, env step 안에서 *POS 좌표 원점 평행이동* (inertial frame 보존). 자세 설계: `docs/2026-05-29_1531_v1_divert_scenario_plan.md`.
+
+**Baseline 결과 (n=50, estimated)**:
+
+| controller | divert | divert_hard | hard | noisy |
+|---|---|---|---|---|
+| pid | **78%** | **18%** ⚠️ | 58% | 84% |
+| waypoint | 42% | 58% | 52% | 76% |
+| actuator (S1) | 16% | 56% | 46% | 74% |
+| actuator2 (S2) | 20% | **54%** | 54% | 80% |
+
+**핵심 발견 — 정반대 실패 모드**:
+- **divert (mild)**: PID 압도 (78% vs MPC 16–20%). MPC 변형들은 *호버링→타임아웃* (29–42 timeout/50). H1 반증.
+- **divert_hard**: PID 가 **37/50 too_high** (위로 박살남, windup) ↔ MPC 변형들 50/50 모두 착륙 (54–58% 성공). H1 *조건부* 검증.
+
+**해석**: "PID 가 hard/noisy 에서 잘하는 것" 은 *외란 약함 + 단거리* 의 PID-favorable 환경이었기 때문. 큰 갑작스러운 오차 (divert + hard 외란) 가 들어가면 PID 의 windup 안전장치 부재가 catastrophic. MPC plan-기반은 *훨씬* 견고. 단 mild divert 의 hover-and-timeout 은 MPC wrapper 의 commit-to-descent 부재 문제로 추정 — Step 3 만으로 안 풀릴 수 있음.
+
+**Step 1 vs Step 2**: divert 16 vs 20%, divert_hard 56 vs 54% — 또 노이즈 안 (McNemar p > 0.3). S1/S2 사실상 구분 불가 결론 유지.
+
+자료: `docs/2026-05-29_1545_v1_divert_baseline_results.md` (raw), `docs/2026-05-29_1550_v1_divert_baseline_analysis.md` (분석·H1 부분 검증/반증).
+
+**다음**: Step 3 (SCP 6-DOF) 구현 → 4 시나리오 × 5 컨트롤러 비교 → H2 평가.
+
+## 2026-05-29 16:34 (KST) — MPC hover 버그 1줄 fix: `lookahead 4 → 10` → MPC 가 *처음으로* PID 능가
+
+**진단** (`scripts/diagnose_hover_bug.py`): mild divert seed=0 의 시계열을 찍어 보니 — t=2.66s (패드 점프 직후), MPC plan **종착점**(`pend`)은 0.93m (≈ 패드, 정확함) 인데 wrapper 가 PID 에 전달한 xy 목표는 **9.12m** (= MPC plan 의 0.8s 시점). 즉 *MPC plan 자체는 멀쩡* — wrapper 가 plan 의 *너무 초반* 만 보고 PID 에 약한 신호 줘서 PID 가 살살 가다가 timeout.
+
+**Fix**: `LandingCvxpyWaypointPID` (+ Step 1/2 wrapper) 의 `lookahead` 기본값 **4 → 10** (= 0.8s → 2s 앞 점). 한 줄.
+
+**Sweep 결과**:
+
+| lookahead | divert | divert_hard | hard | noisy |
+|---|---|---|---|---|
+| 4 | 16% | 56% | 46% | 74% |
+| **10** | **90%** | 52% | **68%** | 78% |
+| 19 | 88% | **32%** ⚠️ | 58% | 82% |
+
+→ `10` 이 sweet spot. `19` 는 PID 단독처럼 즉시 패드 노림 → divert_hard 에서 too_high windup 재현 (22/50).
+
+**전체 fix 후 (n=50, estimated)**:
+
+| | PID | waypoint | actuator (S1) | actuator2 (S2) |
+|---|---|---|---|---|
+| hard | 58% | 54% | **68%** (+10pp) | 64% |
+| noisy | **84%** | 72% | 78% | 72% |
+| divert | 78% | 94% | 90% | **96%** ✨ |
+| divert_hard | 18% ⚠️ | **64%** (+46pp) | 52% | 52% |
+
+→ **MPC 가 3/4 시나리오에서 PID 능가** (divert +18pp, divert_hard +46pp, hard +10pp). noisy 만 PID 가 -6pp 우위 (외란 약함 → reactive PID 의 자연스러운 홈그라운드).
+
+**의미**:
+- 이전 "MPC 가 PID 못 이긴다" 결론은 *wrapper 버그* 때문이었음 — MPC 알고리즘이 아니라 통합 layer 의 문제.
+- 이제 Step 3 (SCP 6-DOF) 의 *진짜* 효과를 측정할 strong baseline 확보.
+
+**부수 토론** — `docs/2026-05-29_1653_v1_lookahead_vs_spacex_design.md`: 우리 `lookahead` 트릭과 SpaceX 식 *전체 trajectory time-indexed tracking* 의 차이. 우리가 `lookahead` 식으로 간 이유 = *검증된 PID 인터페이스 재사용* (한 점 setpoint 만 받음). 정통 trajectory tracking 은 1~2시간 작업으로 가능 — Step 3 의 plan 정확도 향상이 wrapper 한계에 막히는지 측정 후 결정.
+
+자료: `docs/2026-05-29_1634_v1_hover_bug_fix.md` (진단+fix), `docs/2026-05-29_1634_v1_hover_bug_fix_results.md` (raw), `docs/2026-05-29_1653_v1_lookahead_vs_spacex_design.md` (architecture 비교).
+
+## 2026-05-29 18:45 (KST) — 정통 SpaceX-식 stack 처음부터 구현 → 음의 결과 + 원인 정리
+
+**작업**: `src/rocketsim/spacex/` 새 폴더로 *처음부터* G-FOLD-식 stack 구현. 5 파일 (convex_landing_mpc, trajectory_tracker, attitude_controller, landing_controller, __init__). 기존 PID/MPC 의존성 없음. 알고리즘:
+
+1. **Convex MPC (G-FOLD)**: min-fuel `∑‖u‖` + running z + terminal landing. 제약: 글라이드슬로프 30° (★ 새로 추가), 틸트 콘, 추력 magmin/max, 강하속도 한계. **Shrinking horizon** — `N = ⌊(T_final − sim_t)/dt⌋`, T_final 고정.
+2. **Trajectory tracker**: time-indexed `tau = t − plan.start_t`, (p_ref, v_ref, u_ff) 보간, PD+I (HoverPID 게인 재사용). 적분기 anti-windup. **No lookahead, no anticipation, no setpoint hack.**
+3. **Attitude controller**: 분리된 클래스. 쿼터니언 PD on body-z alignment → 짐벌 inverse.
+
+자세 알고리즘 + 수식: `docs/2026-05-29_1830_v1_spacex_formulas_and_algorithms.md`.
+
+**결과 (n=50, estimated)**:
+
+| | PID | actuator (la=10) | spacex (default) | spacex (튜닝) |
+|---|---|---|---|---|
+| hard | 58% | **68%** | 6% | **0%** ⚠️ |
+| noisy | **84%** | 78% | 22% | 12% |
+| divert | 78% | **90%** | 4% | 16% |
+| divert_hard | 18% | **52%** | 6% | 0% |
+
+→ **모든 시나리오에서 *훨씬* 못 함**. 가설 반증.
+
+**원인**:
+1. **Hoverslam 패턴 + actuator lag**: MPC 가 coast-then-burn plan 짜지만 EDF thrust τ=0.08s + 짐벌 200°/s 한계로 마지막 burst 가 *늦게* 도달 → touchdown vspeed 3~5 m/s (한계 1.0 의 5배 충돌).
+2. **단거리에서 long-horizon advantage 부재**: 5-15m 강하에선 MPC 의 *long look-ahead* 효과 미미. PID 의 reactive 가 충분.
+3. **글라이드슬로프 vs divert 충돌**: 패드 +10m 점프 시 글라이드슬로프 30° 안으로 끌어오려고 *위로* 끌어올림 → too_high / out_of_bounds.
+4. **PID integrator + landing gate 의 *bundled* 디자인 강점**: 기존 wrapper 의 `HoverPID._z_int`, `LandingGuidance.touchdown_ready` 같은 게이트들이 *우리 EDF + 단거리* 환경에 *극도로 최적화* 되어 있었음.
+
+**교훈**:
+- "알고리즘 정통성 ≠ 우리 환경에서 성능". SpaceX 정통은 *그들* 시나리오 (Falcon 9, km 단위, 연료 결정적) 에 맞춤화. 우리 EDF testbed (단거리, TWR>1, hover 가능) 는 *PID+lookahead* 의 홈그라운드.
+- **lookahead=10 트릭은 hack 이 아니라 *우리 use case 에 잘 튜닝된* 디자인**.
+- 그래도 `src/rocketsim/spacex/` 는 *교과서 reference 구현* 으로 보존. Step 3 (SCP 6-DOF) 의 시작점으로 가치 있음.
+
+자료: `docs/2026-05-29_1753_v1_spacex_style_design.md` (사전 설계), `docs/2026-05-29_1830_v1_spacex_formulas_and_algorithms.md` (수식·알고리즘 통합), `docs/2026-05-29_1830_v1_spacex_results.md` (raw), `docs/2026-05-29_1845_v1_spacex_negative_result.md` (음의 결과 + 원인).
+
+**다음**: Step 3 (점질량 떠난 SCP 6-DOF) 또는 SpaceX-식 stack 에 actuator-aware constraint 포팅. 사용자 결정 대기.
+
+## 2026-05-29 20:45 (KST) — SpaceX MPC + actuator-aware (Step 1·2) 포팅: 두 가지 의외 결과
+
+**작업**: `ConvexLandingMPC` 에 옵션 파라미터 `slew_factor`, `tau_spool` 추가. 설정 시 `u` 를 state 로 승격 + `du` control + 슬루 SOC, T·T_cmd 추가 + 1차 지연 + `||u|| ≤ T` lossless conv. 편의 subclass `ActuatorAwareLandingMPC` / `ActuatorMagLagLandingMPC`. `LandingControllerSpaceX` 에 `planner_cls` 매개변수. eval 에 `spacex_actuator`, `spacex_actuator2` 추가. 부수 fix: descent-rate 제약을 k=0 에서 제외 + soft slack (hard IC 의 -3~-5 m/s 시작 vz 가 v_max_desc=2 와 strict infeasible 였음).
+
+**결과 (n=50, estimated)**:
+
+| | PID | actuator(la=10) | spacex(이전) | **spacex(now)** | spacex_actuator | spacex_actuator2 |
+|---|---|---|---|---|---|---|
+| hard | 58% | **68%** | 6% | **14%** | 10% | 8% |
+| noisy | **84%** | 78% | 22% | **28%** | 10% | 14% |
+| divert | 78% | **90%** | 4% | **32%** | 12% | 8% |
+| divert_hard | 18% | **52%** | 6% | **24%** | 10% | 10% |
+
+**의외 결과 1**: base spacex 가 descent slack fix 만으로 *부수적* 4-5배 개선. 이전 평가의 *대부분 실패* 가 *알고리즘 한계* 가 아니라 *제약 strict infeasibility* + fallback hover 였음. *진짜* SpaceX 식 성능은 *14-32%* 수준.
+
+**의외 결과 2**: Step 1/2 actuator-aware 가 base 보다 *모든 시나리오에서 나빠짐*. Touchdown 분해 결정적 — Step 1/2 가 *지면 도달율* 은 올렸지만 (14→29 in hard) *soft 비율* 폭락 (50% → 14%). 부드러운 plan + 약한 inner-loop (PID integrator/gate 부재) = 둔한 거동 + 정밀 commit 실패.
+
+**진짜 메커니즘**: plan 정확도 향상의 *방향성* 이 *inner-loop 강도* 에 따라 반대. PID-bundled (la=10) 위에선 약간 + 효과 (+6-8pp), spacex stack 위에선 - 효과 (-4-20pp). `actuator(la=10)` 의 wrapper 가 *우리 EDF + 단거리* 에 *극도로 최적화*.
+
+**최종 평가**: SpaceX 식 stack 은 *구조적으로 깔끔* 한 reference 로 보존. 실용 baseline 은 여전히 `actuator (la=10)`. Step 3 (SCP 6-DOF) 진행 시 *이미 강한* lookahead+PID wrapper 위에서 모델 정확도 효과 측정 권장.
+
+자료: `docs/2026-05-29_1903_v1_spacex_actuator_results.md` (raw), `docs/2026-05-29_2045_v1_spacex_actuator_analysis.md` (분석).
+
+## 2026-05-29 21:10 (KST) — Step 3 (linearized 6-DOF MPC): divert_hard 에서 최고 (+4pp)
+
+**작업**: `src/rocketsim/controllers/scp_6dof_mpc.py` 새 파일 — 자세 φ (3, body 소각도 회전벡터) + 각속도 ω (3) 를 MPC *상태* 로 추가. 12-D state + 3-D control (T, gx, gy). 호버·수직 주변 single-shot linearization (`R(q)e_z ≈ e_z + (φ_y, −φ_x, 0)`, `τ_body ≈ m·g·L·(−gy, gx, 0)`) → fully convex SOCP, SCP iteration *없이* 단일 솔브. 점질량 떠나는 첫 단계. 래퍼 `LandingScp6DofWaypointPID` 는 기존 `LandingCvxpyWaypointPID` 의 lookahead=10 + HoverPID gate 머신을 그대로 재사용 (Step 1/2 와 *공정 비교*).
+
+**결과 (n=50, estimated)**:
+
+| | PID | actuator(la=10) | actuator2(la=10) | **scp (la=10)** |
+|---|---|---|---|---|
+| hard | 58% | **68%** | 64% | 58% |
+| noisy | **84%** | 78% | 72% | 74% |
+| divert | 78% | **90%** | **96%** | 84% |
+| divert_hard | 18% | 52% | 52% | **56%** ✨ |
+
+**의미**: Step 3 의 *자세 직접 모델링* 효과가 *극한 시나리오 (divert_hard)* 에서만 두드러짐. 평이한 시나리오는 Step 1 의 슬루 abstraction 으로 *이미 충분*. 가설 부분 검증 — "점질량 한계가 진짜로 풀리는 건 *큰 자세 거동 영역*". divert_hard 의 PID 18% / actuator 52% / scp 56% 격차는 *3배 → +4pp* 의 진행. McNemar 로는 50 ep 에서 statistically marginal 이지만 trend 일관.
+
+**한계**: 호버 주변 fixed linearization. tilt 30° 에서 R(q)e_z 의 sin θ 와 θ 차이 ~5%. Full SCP (매 replan iterative + trust region) 가면 추가 개선 가능성 — 단 single-shot 이 *이미* divert_hard 의 격차 회복 → 추가 효과 marginal 예상.
+
+**최종 baseline 현황**:
+- `actuator (la=10)` — hard/divert 의 best
+- `actuator2 (la=10)` — divert 의 best (96%)
+- `scp (la=10)` — divert_hard 의 best (56%)
+- `PID` — noisy 의 best (84%)
+
+→ 단일 우승자 없음. 시나리오별 적합 알고리즘 다름. 시뮬 baseline 형성 완료.
+
+자료: `docs/2026-05-29_2057_v1_step3_results.md` (raw), `docs/2026-05-29_2110_v1_step3_analysis.md` (분석).
+
+## 2026-05-29 21:08 (KST) — 시뮬에 roll 구동 물리 부재 발견 → EDF 물리는 별도 "세계"로 (설계만)
+
+**발견**: 현재 시뮬(`dynamics.py`)이 엔진을 *순수 짐벌 추력 벡터*로 모델링해서 **roll(z축) 구동 항이 없다**. 토크 = `cross(r_engine, f_thrust_body)` 라 z성분 항상 0, `disturbances.py`도 z축 외란 0 처리. 시뮬은 *완전한 3D/6-DOF* 이고 roll 동역학도 적분되지만(omega_z 주면 돔), roll을 *구동하는 힘* 이 없어 0에 고정. 이름은 "EDF testbed"인데 동역학은 *로켓엔진(짐벌 노즐)* 처럼 짜여 EDF 팬 회전 물리가 빠짐.
+
+**실세계 EDF roll 물리 (1차)**: 팬을 회전 로터로 보면 — ① 반작용 토크(지배적, `Q = thrust·D·C_Q/C_T`, 추력 비례, 측정 불가 외란) ② 자이로 세차(`-ω×H_fan`, 축간 커플링). hover 추력 24.5N → Q≈0.29 N·m, roll 관성 0.004 → ~70 rad/s² 로 *roll 제어 없이는 발산* (실물이 카운터-로테이팅/RCS 쓰는 이유).
+
+**결정**: EDF roll 물리를 *지금 코드에 박지 않는다.* 현재 SpaceX/actuator-MPC 실험 마무리 후, **별도 새 "세계"** 에 넣는다. 이유: 나중에 로켓엔진으로 전환 예정(팬 반작용 없음) → 공용 모델 오염 방지 + "엔진 물리 갈아끼우기" 실험 노하우 축적.
+
+**설계 (pluggable propulsion)**: 6-DOF 강체 적분기는 범용 유지(`(state,cmd)→force,torque,내부상태미분`), 추진 모델 분리 — `EdfPropulsion`(반작용+자이로+스풀lag) / `RocketPropulsion`(순수 짐벌+TVC서보+터보펌프/슬로싱, 나중). TVC = **유닛 전체 짐벌** 로 결정(소형 EDF 표준, 기존 모델과 일관).
+
+**구현 시 정할 것**: 분리 단위(`propulsion/` 모듈 vs 새 world 클래스), 범위((a)반작용만/(b)+자이로/(c)+roll 제어채널), 계수는 추정치→EDF 벤치 캘리브레이션.
+
+자료: `docs/2026-05-29_2108_v1_edf_roll_physics_design.md`. (코드 변경 없음 — 설계 결정만.)
+
+## 2026-05-29 21:55 (KST) — Robust controller: warm-SCP + trust region + xy_ref smoothing
+
+**작업**:
+
+1. **Warm-start SCP MPC** (`CvxpyScpWarm6DofMPC`): single-shot Step 3 가 호버 주변 *고정* linearization 인 한계 (divert_hard 의 19% 시간 tilt > 10°) 를 극복. 매 replan 마다 *이전 plan 의 자세 trajectory* 를 reference 로 시간-변동 linearize. cvxpy parameter (n̂_bar[k], M_φ_bar[k]) 만 업데이트, 컴파일 한 번.
+
+2. **Trust region 한 줄 fix**: 첫 시도에서 divert/divert_hard 가 -14pp/-38pp 회귀. 진단 — divert 점프 후 q̄ 이 *event 전* 의 plan 이라 φ[0] = rotation from q̄ to actual q 가 *큼* → linearization 신뢰 영역 벗어남. `if ||φ[0]|| > 0.30 rad: ref_q[:] = q_actual` 추가 → 모두 회복 + Step 3 single-shot 보다 +4pp 추가 우위.
+
+3. **xy_ref EMA smoothing** (`xy_ref_alpha` 파라미터): noisy 약점 가설 — MPC plan jitter. EMA 평활화로 검증. *noisy 에는 효과 없음 (가설 위조)*. 그러나 divert_hard 에서 actuator 의 +8pp 부수 효과 (52→60%).
+
+**결과 (n=50, estimated)**:
+
+| controller | hard | noisy | divert | divert_hard | **worst-case** |
+|---|---|---|---|---|---|
+| PID | 58% | **84%** | 78% | 18% ⚠️ | **18%** |
+| actuator | **68%** | 78% | 90% | 52% | 52% |
+| scp (단발) | 58% | 74% | 84% | 56% | 56% |
+| **scp_warm (TR)** | **70%** | 74% | 84% | **60%** | **60%** ✨ |
+| actuator_smooth_05 | 60% | 76% | **92%** | **60%** | **60%** ✨ |
+
+**진짜 발전**: worst-case 18% (PID) → 60% (scp_warm 또는 actuator_smooth_05) = **3.33× robust**. 어떤 시나리오든 *최소 60%* 보장.
+
+**알고리즘 의미**:
+- Trust region 이 SCP 의 *수학적 필수 안전장치* 임을 데이터로 확인 (없으면 -38pp 붕괴, 추가하면 +4pp 우위)
+- noisy 의 PID 우위는 *MPC plan 노이즈* 가 아닌 다른 원인 (다음 작업 후보)
+- scp_warm (TR) 이 *균형형 robust* 후보 — 4 시나리오 모두 ≥ 60%, 3개 ≥ 70%
+
+**계속 갈 길**: multi-iteration full SCP (정통 완성도), EDF roll 물리 추가 (시뮬-현실 갭), noisy 의 estimator 자동 조정.
+
+자료: `docs/2026-05-29_2126_v1_scp_warm_results.md` (raw without TR), `docs/2026-05-29_2155_v1_robust_controller_analysis.md` (분석 + TR 추가).
+
+## 2026-05-29 22:22 (KST) — Full SCP marginal + EDF roll cliff edge
+
+**Full SCP (multi-iteration)**: `CvxpyScpFull6DofMPC` 추가 — 매 replan 마다 *수렴할 때까지* SCP 반복 (최대 3 iter, ||φ|| < 0.02 rad). 결과 — 진단 (`docs/2026-05-29_2110_v1_*`) 의 예측대로 *거의 효과 없음*: scp_warm 70/74/84/60 vs scp_full 64/74/86/60. worst-case 동일 60%. **이유**: vehicle 의 대부분 시간 < 10° tilt → linearization 오차 < 1% → 수렴 반복해도 *수렴할 곳이 없음*. 학습/완성도 가치 있고 시뮬-real 갭이 커진 향후 단계에서 의미 있을 가능성.
+
+**EDF roll 물리 구현** (`docs/2026-05-29_2108_v1_*` 의 설계 실현): `Vehicle.edf_roll_coeff/edf_fan_inertia/edf_fan_omega_max` opt-in 파라미터. `dynamics.py` 에 *반작용 토크* + *자이로 세차* 추가. 단위 테스트 3개 (모두 통과). `make_landing_env(edf_roll=True, edf_roll_scale=...)` + `evaluate_navigation.py --edf-roll --edf-roll-scale ...`.
+
+**Cliff-edge 결과**:
+
+| edf_roll_scale | actuator | scp_warm |
+|---|---|---|
+| 0.00 (없음) | 70% | 70% |
+| **0.05** (95% 상쇄) | **5%** ⚠️ | **0%** ⚠️ |
+| 0.10 | 0% | 0% |
+| 0.50 | 0% | 0% |
+| 1.00 (싱글 팬) | 0% | 0% |
+
+→ **scale 0.00 → 0.05 의 *cliff edge*** — 70% 에서 0% 로 *떨어짐*. 실패 모드 거의 다 `crash_tilt` 또는 `out_of_bounds`. 자세 PID 가 *roll 토크 채널* 접근 권한 *없음* (gimbal × thrust 의 z 성분 = 0).
+
+**의미** — *전체 baseline 의 의미를 바꿈*:
+- worst-case 60% 는 *roll 물리 *없는* 가정* 하에. 실제 EDF 단일 팬은 **0%** 박살.
+- 시뮬 알고리즘 마이크로-튜닝의 *한계* 명확. 진짜 robust system → **카운터-rotation 만으로는 부족** (95% 상쇄도 cliff). **Active roll control 채널 필수** (RCS, 반작용 휠, blade 가변 피치) — 또는 로켓 엔진으로 전환.
+
+자료: `docs/2026-05-29_2203_v1_scp_full_results.md` (raw), `docs/2026-05-29_2212_v1_scp_full_analysis.md`, `docs/2026-05-29_2222_v1_edf_roll_implementation.md`.
 
 <!-- 새 항목은 이 줄 위에 추가 -->

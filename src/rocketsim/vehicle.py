@@ -37,6 +37,27 @@ class Vehicle:
     # The controller does NOT know about this -> a steady torque disturbance.
     thrust_misalign: np.ndarray = field(default_factory=lambda: np.zeros(2))
 
+    # ─── EDF roll physics (opt-in, default disabled) ─────────────────
+    # The standard simulator has zero body-z torque because cross(r_engine,
+    # f_thrust_body) is identically zero on its z component.  A real EDF
+    # produces *significant* roll torque from the spinning fan that we want
+    # to optionally model.  See docs/2026-05-29_2108_v1_edf_roll_physics_*.
+    #
+    # When edf_roll_coeff > 0 the simulator applies a body-z reaction
+    # torque proportional to instantaneous thrust:
+    #     tau_react = -edf_roll_coeff * thrust  (N·m, body-z component)
+    # Typical small EDF: roll_coeff ~ 0.012 (so 24.5 N hover -> 0.29 N·m).
+    # The reaction sign is opposite to fan spin direction; pick the
+    # convention so the body rotates "backwards" relative to thrust.
+    edf_roll_coeff: float = 0.0
+    # When edf_fan_inertia > 0 the simulator also models gyroscopic
+    # precession from the spinning fan, with fan angular speed scaled by
+    # current thrust:  omega_fan = edf_fan_omega_max * sqrt(thrust / Tmax).
+    # The gyroscopic torque coupling is  -omega_body × H_fan_body
+    # (body frame), where H_fan_body = (0, 0, I_fan * omega_fan).
+    edf_fan_inertia: float = 0.0  # kg·m^2
+    edf_fan_omega_max: float = 0.0  # rad/s at full thrust
+
     def __post_init__(self) -> None:
         self.thrust_misalign = np.asarray(self.thrust_misalign, dtype=float)
         self.inertia = np.asarray(self.inertia, dtype=float)

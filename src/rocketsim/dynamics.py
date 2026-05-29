@@ -115,6 +115,26 @@ def state_derivative(
     # --- Torque (body frame) ---
     r_engine = np.array([0.0, 0.0, -vehicle.engine_offset])
     torque_body = np.cross(r_engine, f_thrust_body)
+
+    # --- Optional EDF roll physics (see docs/2026-05-29_2108) ---
+    if vehicle.edf_roll_coeff > 0.0:
+        # Fan reaction torque: spinning fan pushes air down, body feels
+        # Newton's 3rd-law reaction about body-z, opposing fan spin.
+        torque_body = torque_body + np.array(
+            [0.0, 0.0, -vehicle.edf_roll_coeff * thrust]
+        )
+    if vehicle.edf_fan_inertia > 0.0 and vehicle.edf_fan_omega_max > 0.0:
+        # Gyroscopic precession: tau_gyro = -omega_body × H_fan_body.
+        # Fan spin scales with sqrt(thrust / max_thrust) because thrust
+        # ∝ omega_fan^2 in the basic momentum-disk model.
+        omega_fan = vehicle.edf_fan_omega_max * np.sqrt(
+            max(thrust, 0.0) / vehicle.max_thrust
+        )
+        H_fan_body = np.array(
+            [0.0, 0.0, vehicle.edf_fan_inertia * omega_fan]
+        )
+        torque_body = torque_body - np.cross(omega, H_fan_body)
+
     ang_accel = vehicle.inertia_inv @ (torque_body - np.cross(omega, vehicle.inertia @ omega))
 
     # --- Thrust spool-up (first-order lag) ---
