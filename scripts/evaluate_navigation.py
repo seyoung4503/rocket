@@ -401,7 +401,10 @@ def main() -> int:
     ap.add_argument(
         "--difficulty",
         default="noisy",
-        choices=["calm", "moderate", "hard", "unknown", "recovery", "noisy"],
+        choices=[
+            "calm", "moderate", "hard", "unknown", "recovery", "noisy",
+            "divert", "divert_hard",
+        ],
         help="single difficulty; kept for compatibility",
     )
     ap.add_argument(

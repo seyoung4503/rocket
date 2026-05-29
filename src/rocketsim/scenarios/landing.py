@@ -59,6 +59,43 @@ class LandingScenario:
 
     pad_alt: float = 0.0  # m
 
+    # --- in-flight pad shift (divert scenario) ------------------------------
+    # When ``pad_shift_time`` is not None and the sim time crosses it, the env
+    # snaps the vehicle's stored POS by ``-pad_shift_delta_xy`` (a rigid
+    # change-of-origin into a new pad-relative frame). All downstream checks
+    # (check_done, is_soft_landing, potential) keep working unchanged because
+    # they already treat pad as the origin. Dynamics and disturbances are
+    # invariant to inertial translations, so this is physically clean.
+    # See docs/2026-05-29_1531_v1_divert_scenario_plan.md.
+    pad_shift_time: float | None = None  # seconds; None = no shift
+    pad_shift_delta_xy: tuple[float, float] = (0.0, 0.0)  # m, world frame
+
+    @classmethod
+    def divert(cls) -> "LandingScenario":
+        """Moderate IC + in-flight pad shift (+10m X) at t=2s. Designed to
+        exercise MPC's structural advantage (receding-horizon replanning) on
+        a target-switching event that hurts a windup-prone PID."""
+        return cls(
+            pad_shift_time=2.0,
+            pad_shift_delta_xy=(10.0, 0.0),
+        )
+
+    @classmethod
+    def divert_hard(cls) -> "LandingScenario":
+        """Hard IC + divert. Tests robustness of the divert response under
+        large initial errors / fast descents (composes hard()'s IC with the
+        divert event)."""
+        return cls(
+            start_alt=(10.0, 14.0),
+            start_descent=(-2.0, -5.0),
+            start_offset=3.0,
+            start_tilt_deg=20.0,
+            start_lateral_vel=2.0,
+            timeout=35.0,
+            pad_shift_time=2.0,
+            pad_shift_delta_xy=(10.0, 0.0),
+        )
+
     @classmethod
     def hard(cls) -> "LandingScenario":
         """Aggressive start: higher, faster descent, big offset/tilt/lateral vel.

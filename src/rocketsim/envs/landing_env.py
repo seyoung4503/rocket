@@ -167,6 +167,9 @@ class LandingEnv(gym.Env):
         self.state = self.scenario.sample_initial_state(self._rng, scale=self.init_scale)
         self.t = 0.0
         self._prev_gimbal = np.zeros(2)
+        # Divert one-shot guard. Set True after the pad-shift event fires so
+        # subsequent steps don't re-translate the state.
+        self._pad_shifted = False
         self.measured = self._measure()
         self._prev_phi = self.scenario.potential(self.state)
         if self.residual:
@@ -191,10 +194,26 @@ class LandingEnv(gym.Env):
             applied = np.array([cmd.throttle, self._prev_gimbal[0], self._prev_gimbal[1]])
 
             wind, fext = self.disturbance.step(self.t, self.sim_dt, self._rng)
+            prev_t = self.t
             self.state = dyn.rk4_step(
                 self.state, applied, self.sim_dt, self.vehicle, self.world, wind, fext
             )
             self.t += self.sim_dt
+            # In-flight pad shift (divert scenario). If t just crossed the
+            # shift moment, rigidly translate the stored POS so subsequent
+            # pad-relative checks treat the new pad as the origin. Dynamics
+            # are inertial-translation invariant, so this is a pure
+            # change-of-origin.
+            shift_t = self.scenario.pad_shift_time
+            if (
+                shift_t is not None
+                and not self._pad_shifted
+                and prev_t < shift_t <= self.t
+            ):
+                self.state[dyn.POS][:2] -= np.asarray(
+                    self.scenario.pad_shift_delta_xy, dtype=float
+                )
+                self._pad_shifted = True
             done, reason = self.scenario.check_done(self.state, self.t)
             if done:
                 break
@@ -219,7 +238,8 @@ class LandingEnv(gym.Env):
 
 
 def make_landing_env(difficulty: str = "calm", **kwargs) -> LandingEnv:
-    """Factory: difficulty in {calm, moderate, hard, unknown}."""
+    """Factory: difficulty in
+    {calm, moderate, hard, unknown, recovery, noisy, divert, divert_hard}."""
     from ..scenarios import disturbances as D
 
     presets = {"calm": D.calm, "moderate": D.moderate, "hard": D.hard, "unknown": D.model_unknown}
@@ -230,6 +250,16 @@ def make_landing_env(difficulty: str = "calm", **kwargs) -> LandingEnv:
         dist, rand = D.moderate()  # mild wind/plant — isolate the sensor-noise effect
         scenario = LandingScenario()
         kwargs.setdefault("obs_noise", 2.0)  # heavy noise: PID (no filter) drops to ~21%
+    elif difficulty == "divert":
+        # In-flight pad shift on top of the moderate IC + moderate disturbance.
+        # Designed to exercise receding-horizon replanning; see
+        # docs/2026-05-29_1531_v1_divert_scenario_plan.md.
+        dist, rand = D.moderate()
+        scenario = LandingScenario.divert()
+    elif difficulty == "divert_hard":
+        # divert composed with the hard IC + hard disturbance preset.
+        dist, rand = D.hard()
+        scenario = LandingScenario.divert_hard()
     else:
         dist, rand = presets[difficulty]()
         scenario = LandingScenario.hard() if difficulty == "hard" else LandingScenario()
