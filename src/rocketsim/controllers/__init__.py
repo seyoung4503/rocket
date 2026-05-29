@@ -16,8 +16,10 @@ from .mpc import (
 from .pid import HoverPID
 from .scp_6dof_mpc import (
     CvxpyScp6DofMPC,
+    CvxpyScpFull6DofMPC,
     CvxpyScpWarm6DofMPC,
     LandingScp6DofWaypointPID,
+    LandingScpFull6DofWaypointPID,
     LandingScpWarm6DofWaypointPID,
 )
 from .trajectory_tracker import (
@@ -55,6 +57,10 @@ __all__ = [
     # previous plan's attitude trajectory (one SCP iteration per replan).
     "CvxpyScpWarm6DofMPC",
     "LandingScpWarm6DofWaypointPID",
+    # Step 3 full SCP: multi-iteration solver (up to 3-5 inner SCP
+    # iterations per replan, converging on the non-linear dynamics).
+    "CvxpyScpFull6DofMPC",
+    "LandingScpFull6DofWaypointPID",
     # SpaceX-style time-indexed trajectory tracking (no `lookahead` knob);
     # see docs/2026-05-29_1653_v1_lookahead_vs_spacex_design.md.
     "LandingTrajectoryTrackingMPC",

@@ -803,3 +803,196 @@ class LandingScpWarm6DofWaypointPID(LandingScp6DofWaypointPID):
         if "v_max_desc" in kwargs:
             mpc_kwargs["v_max_desc"] = kwargs["v_max_desc"]
         self.mpc = CvxpyScpWarm6DofMPC(vehicle, env, **mpc_kwargs)
+
+
+# ============================================================================
+# Step 3 v3 — Full SCP with inner iteration loop.
+#
+# Where ``CvxpyScpWarm6DofMPC`` performs *one* SCP iteration per replan
+# and relies on the receding window to absorb residual non-linearity,
+# this variant iterates the linearization-then-solve cycle within a
+# single ``plan()`` call until either the per-step rotation update
+# ``||φ||`` falls below a convergence threshold or a hard iteration cap
+# is reached.  The trust-region reset inherited from the warm variant
+# still guards against pathological references (e.g., the divert pad
+# teleport), so unbounded iterations cannot diverge the plan.
+# ============================================================================
+
+
+class CvxpyScpFull6DofMPC(CvxpyScpWarm6DofMPC):
+    """SCP with an inner-iteration loop inside each replan.
+
+    Parameters
+    ----------
+    max_iters : int
+        Hard cap on inner iterations per ``plan()`` call.  Three is a
+        good practical balance: the first iteration handles the bulk of
+        the trajectory shape and the next two refine the linearization
+        around it.  Higher values rarely change the solution but cost
+        cvxpy solves.
+    converge_threshold : float
+        Stop the inner loop once ``max_k ||φ[k]||`` falls below this
+        radians threshold.  0.02 rad ≈ 1.15° is small enough that the
+        linearization error  R(q̄·δq)·ê_z ≈ R(q̄)·ê_z + R(q̄)·[φ]×·ê_z
+        is well inside the linear region.
+    """
+
+    def __init__(
+        self,
+        vehicle: Vehicle,
+        env: Environment,
+        max_iters: int = 3,
+        converge_threshold: float = 0.02,
+        **kwargs,
+    ):
+        super().__init__(vehicle, env, **kwargs)
+        self.max_iters = max(1, int(max_iters))
+        self.converge_threshold = float(converge_threshold)
+        # Diagnostic counter: how many iterations did the most recent
+        # solve consume?  Useful for sanity-checking convergence in
+        # tests / instrumentation; default 0 means "no solve yet".
+        self.last_iters_used = 0
+
+    # ------------------------------------------------------------------
+    def plan(
+        self,
+        pos: np.ndarray,
+        vel: np.ndarray,
+        q: np.ndarray | None = None,
+        omega: np.ndarray | None = None,
+        **_ignored,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        # Boundary conditions are fixed across iterations.
+        self.p0.value = np.asarray(pos, dtype=float)
+        self.v0.value = np.asarray(vel, dtype=float)
+        if q is None:
+            q_actual = np.array([1.0, 0.0, 0.0, 0.0])
+        else:
+            q_actual = np.asarray(q, dtype=float)
+        if omega is None:
+            self.omega0.value = np.zeros(3)
+        else:
+            self.omega0.value = np.asarray(omega, dtype=float)
+
+        # Cross-replan trust-region reset (same as warm variant).
+        q_delta0 = self._quat_mul(self._quat_conj(self._ref_q[0]), q_actual)
+        phi0_initial = self._quat_to_phi(q_delta0)
+        if float(np.linalg.norm(phi0_initial)) > 0.30:
+            self._ref_q[:] = q_actual
+
+        # Inner iteration: each pass linearizes around the *current*
+        # working reference, solves, and updates the reference from the
+        # solution.  ``ref_q_iter`` is the per-iteration working copy;
+        # ``self._ref_q`` is only overwritten with the converged value
+        # at the end so a failed solve doesn't poison the next replan.
+        ref_q_iter = self._ref_q.copy()
+        last_p = last_v = last_phi = last_T = None
+
+        for it in range(self.max_iters):
+            # phi0 is the rotation FROM the current working ref TO actual q.
+            q_delta0 = self._quat_mul(self._quat_conj(ref_q_iter[0]), q_actual)
+            self.phi0.value = self._quat_to_phi(q_delta0)
+
+            # Push working linearization into parameters.
+            for k in range(self.n):
+                R = self._quat_to_rotmat(ref_q_iter[k])
+                self.n_hat_bar[k].value = R @ np.array([0.0, 0.0, 1.0])
+                self.M_phi_bar[k].value = R @ self._skew_ez
+
+            try:
+                self.problem.solve(
+                    solver="CLARABEL", warm_start=True, verbose=False
+                )
+            except Exception:
+                try:
+                    self.problem.solve(
+                        solver="SCS", warm_start=True, verbose=False, max_iters=500
+                    )
+                except Exception:
+                    return None
+            if self.problem.status not in ("optimal", "optimal_inaccurate"):
+                return None
+            if (
+                self.p.value is None
+                or self.v.value is None
+                or self.T.value is None
+                or self.phi.value is None
+            ):
+                return None
+
+            phi_arr_iter = np.asarray(self.phi.value, dtype=float)
+            if not np.all(np.isfinite(phi_arr_iter)):
+                return None
+
+            # Stash latest solution so we can return it after the loop.
+            last_p = np.asarray(self.p.value, dtype=float)
+            last_v = np.asarray(self.v.value, dtype=float)
+            last_phi = phi_arr_iter
+            last_T = np.asarray(self.T.value, dtype=float)
+
+            # Update working reference: q̄_new[k] = q̄[k] ⊗ Δq(φ[k])
+            new_ref_iter = np.empty_like(ref_q_iter)
+            for k in range(self.n + 1):
+                new_ref_iter[k] = self._quat_mul(
+                    ref_q_iter[k], self._phi_to_quat(phi_arr_iter[:, k])
+                )
+
+            # Convergence: have we stopped moving the reference?
+            max_phi = float(
+                np.max(np.linalg.norm(phi_arr_iter, axis=0))
+            )
+            ref_q_iter = new_ref_iter
+            self.last_iters_used = it + 1
+            if max_phi < self.converge_threshold:
+                break
+
+        if last_p is None:
+            return None
+
+        # Build u from the final iteration's solution + final
+        # linearization parameters.
+        u_arr = np.zeros((3, self.n))
+        for k in range(self.n):
+            n_hat = np.asarray(self.n_hat_bar[k].value, dtype=float)
+            M_phi = np.asarray(self.M_phi_bar[k].value, dtype=float)
+            dir_world = n_hat + M_phi @ last_phi[:, k]
+            u_arr[:, k] = last_T[k] / self.m * dir_world
+
+        # Cross-replan warm start: store the converged reference shifted
+        # forward one step.
+        self._ref_q[:-1] = ref_q_iter[1:]
+        self._ref_q[-1] = ref_q_iter[-1]
+
+        if not (np.all(np.isfinite(last_p)) and np.all(np.isfinite(last_v))
+                and np.all(np.isfinite(u_arr))):
+            return None
+        return last_p.copy(), last_v.copy(), u_arr.copy()
+
+
+class LandingScpFull6DofWaypointPID(LandingScpWarm6DofWaypointPID):
+    """Wrapper for the full multi-iter SCP variant.  Identical to the
+    warm-start wrapper except the MPC iterates the linearization within
+    each replan."""
+
+    def __init__(
+        self,
+        vehicle: Vehicle,
+        env: Environment,
+        max_iters: int = 3,
+        converge_threshold: float = 0.02,
+        **kwargs,
+    ):
+        # Build the base wrapper, then swap in the full-SCP MPC.
+        super().__init__(vehicle, env, **kwargs)
+        mpc_kwargs = {}
+        if "mpc_max_tilt" in kwargs:
+            mpc_kwargs["max_tilt"] = kwargs["mpc_max_tilt"]
+        if "v_max_desc" in kwargs:
+            mpc_kwargs["v_max_desc"] = kwargs["v_max_desc"]
+        self.mpc = CvxpyScpFull6DofMPC(
+            vehicle,
+            env,
+            max_iters=max_iters,
+            converge_threshold=converge_threshold,
+            **mpc_kwargs,
+        )

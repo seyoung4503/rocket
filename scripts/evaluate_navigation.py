@@ -58,6 +58,8 @@ CONTROLLERS = (
     # Step 3 warm-start SCP: time-varying linearization around previous
     # plan's attitude trajectory (one SCP iteration per replan).
     "scp_warm",
+    # Step 3 full SCP: multi-iteration solver (3 inner iterations).
+    "scp_full",
     # Noisy weakness sweep: actuator with EMA smoothing on xy waypoint
     # to attenuate noise-driven replan jitter.
     "actuator_smooth_05",
@@ -126,6 +128,9 @@ def make_controller(name: str, env, plant_model: str):
     if name == "scp_warm":
         from rocketsim.controllers import LandingScpWarm6DofWaypointPID
         return LandingScpWarm6DofWaypointPID(vehicle, env.world)
+    if name == "scp_full":
+        from rocketsim.controllers import LandingScpFull6DofWaypointPID
+        return LandingScpFull6DofWaypointPID(vehicle, env.world)
     if name == "actuator_smooth_05":
         from rocketsim.controllers import LandingActuatorAwareWaypointPID
         return LandingActuatorAwareWaypointPID(
