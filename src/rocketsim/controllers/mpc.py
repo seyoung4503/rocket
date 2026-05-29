@@ -587,7 +587,14 @@ class LandingCvxpyWaypointPID:
         env: Environment,
         replan_dt: float = 0.2,
         max_tilt: float = np.deg2rad(20.0),
-        lookahead: int = 4,
+        # 2026-05-29 raised from 4 to 10 after divert-bug diagnostic.
+        # See docs/2026-05-29_<time>_v1_hover_bug_*.md.
+        # 4 (=0.8s ahead) lives in the slow early portion of the MPC plan
+        # and produces too timid an xy_target when divert pushes the pad
+        # 10m sideways. 10 (=2s ahead) gives a target ~halfway through the
+        # plan -- aggressive enough to recover, not so aggressive that PID
+        # over-tilts and triggers `too_high` (a failure mode of lookahead=19).
+        lookahead: int = 10,
         v_max: float = 3.5,
         v_min: float = 0.25,
         flare_gain: float = 0.45,
