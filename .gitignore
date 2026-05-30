@@ -7,7 +7,3 @@ out/
 models/
 runs/
 *.zip
-
-# Optuna trial storage (per-run experiment data; best params baked
-# into docs as needed).  Re-runnable via scripts/tune_controller.py.
-.tuning/
