@@ -43,6 +43,9 @@ from rocketsim.navigation.estimator import LowPassEstimatorConfig  # noqa: E402
 CONTROLLERS = (
     "pid", "vertical", "cvxpy", "guidance", "waypoint", "feasible", "full",
     "actuator",  # Step 1 actuator-aware MPC + PID waypoint (2026-05-29 v1)
+    # Auto-tuned actuator from .tuning/actuator_run1.db trial 21 (2026-05-30).
+    # Best Optuna result over 40 trials × 30 episodes × 4 scenarios.
+    "actuator_tuned",
     # A/B sweep on horizontal-tracking aggressiveness in the actuator-aware MPC
     # (q_pos[xy] / q_final_pos[xy]). Default is 1.2 / 45 which causes ~96%
     # gimbal saturation; A and B relax those weights 4x / 8x respectively.
@@ -109,6 +112,21 @@ def make_controller(name: str, env, plant_model: str):
     if name == "actuator":
         from rocketsim.controllers import LandingActuatorAwareWaypointPID
         return LandingActuatorAwareWaypointPID(vehicle, env.world)
+    if name == "actuator_tuned":
+        # Best params from automated tuning (Optuna trial 21,
+        # .tuning/actuator_run1.db).  n=30 evaluation showed
+        # worst-case 63 % vs the manual baseline's 52 % -- this
+        # controller exists so n=50 verification can confirm.
+        from rocketsim.controllers import LandingActuatorAwareWaypointPID
+        return LandingActuatorAwareWaypointPID(
+            vehicle, env.world,
+            slew_factor=1.3852,
+            slack_weight=197.5023,
+            q_pos_xy=3.7081,
+            q_final_pos_xy=195.0845,
+            xy_ref_alpha=0.7459,
+            lookahead=10,
+        )
     if name == "actuator_a":
         from rocketsim.controllers import LandingActuatorAwareWaypointPID
         return LandingActuatorAwareWaypointPID(
