@@ -61,6 +61,10 @@ CONTROLLERS = (
     # Step 3 warm-start SCP: time-varying linearization around previous
     # plan's attitude trajectory (one SCP iteration per replan).
     "scp_warm",
+    # Auto-tuned scp_warm from .tuning/scp_warm_run1.db trial 6 (2026-05-30).
+    # Best Optuna over 60 trials × 30 episodes × 4 scenarios on the 15
+    # cost-weight parameters of CvxpyScpWarm6DofMPC.
+    "scp_warm_tuned",
     # Step 3 full SCP: multi-iteration solver (3 inner iterations).
     "scp_full",
     # Noisy weakness sweep: actuator with EMA smoothing on xy waypoint
@@ -146,6 +150,34 @@ def make_controller(name: str, env, plant_model: str):
     if name == "scp_warm":
         from rocketsim.controllers import LandingScpWarm6DofWaypointPID
         return LandingScpWarm6DofWaypointPID(vehicle, env.world)
+    if name == "scp_warm_tuned":
+        # Best params from automated tuning (Optuna trial 6,
+        # .tuning/scp_warm_run1.db).  n=30 evaluation showed
+        # worst-case 67 % vs manual baseline's 60 % -- this
+        # controller exists so n=50 verification can confirm.
+        from rocketsim.controllers import LandingScpWarm6DofWaypointPID
+        from rocketsim.controllers.scp_6dof_mpc import CvxpyScpWarm6DofMPC
+        ctrl = LandingScpWarm6DofWaypointPID(vehicle, env.world)
+        # Rebuild the MPC with the tuned cost weights.
+        ctrl.mpc = CvxpyScpWarm6DofMPC(
+            vehicle, env.world,
+            q_pos_xy=0.7351,
+            q_pos_z=0.2722,
+            q_vel_xy=1.4841,
+            q_vel_z=5.7157,
+            q_phi=3.1024,
+            q_omega=0.2048,
+            q_final_pos_xy=57.9523,
+            q_final_pos_z=5.2867,
+            q_final_vel_xy=188.7727,
+            q_final_vel_z=50.5435,
+            q_final_phi=152.3666,
+            q_final_omega=22.4537,
+            r_thrust=0.0753,
+            r_gimbal=0.2638,
+            v_max_desc=2.9950,
+        )
+        return ctrl
     if name == "scp_full":
         from rocketsim.controllers import LandingScpFull6DofWaypointPID
         return LandingScpFull6DofWaypointPID(vehicle, env.world)
