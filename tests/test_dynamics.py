@@ -103,6 +103,52 @@ def test_edf_fan_gyro_couples_yaw_and_pitch():
     assert d[dyn.OMEGA][1] > 0.0
 
 
+def test_edf_vane_roll_torque_proportional_to_thrust_and_cmd():
+    """With edf_vane_torque_max>0 and a roll_cmd in the 4th cmd slot,
+    the body-z torque equals roll_cmd * vane_max * (thrust / Tmax)."""
+    v, env = edf_testbed(), Environment()
+    v.edf_vane_torque_max = 0.5  # N·m at full thrust
+    s = dyn.initial_state(thrust=v.mass * env.gravity)  # hover thrust
+    hover = v.mass * env.gravity / v.max_thrust
+    # Positive roll command at hover thrust.
+    cmd4 = np.array([hover, 0.0, 0.0, 0.6])  # 4-element: include roll_cmd
+    d = dyn.state_derivative(s, cmd4, v, env)
+    expected_tau = 0.6 * 0.5 * (s[dyn.THRUST] / v.max_thrust)
+    expected_alpha = expected_tau / v.inertia[2, 2]
+    assert np.isclose(d[dyn.OMEGA][2], expected_alpha, rtol=1e-6)
+
+
+def test_edf_vane_backward_compatible_with_3element_cmd():
+    """When the caller still uses a 3-element command array (no
+    roll_cmd), the vane code path stays a no-op even if
+    edf_vane_torque_max is set."""
+    v, env = edf_testbed(), Environment()
+    v.edf_vane_torque_max = 0.5
+    s = dyn.initial_state(thrust=v.mass * env.gravity)
+    hover = v.mass * env.gravity / v.max_thrust
+    cmd3 = np.array([hover, 0.0, 0.0])  # legacy 3-element
+    d = dyn.state_derivative(s, cmd3, v, env)
+    assert abs(d[dyn.OMEGA][2]) < 1e-9
+
+
+def test_edf_vane_cancels_edf_roll_reaction_at_hover():
+    """The whole point of the vane: when paired with edf_roll_coeff
+    and a roll_cmd chosen to exactly counter the reaction torque,
+    the net body-z torque cancels and omega_z stays still."""
+    v, env = edf_testbed(), Environment()
+    v.edf_roll_coeff = 0.012      # reaction torque
+    v.edf_vane_torque_max = 0.5    # vane authority
+    s = dyn.initial_state(thrust=v.mass * env.gravity)
+    hover = v.mass * env.gravity / v.max_thrust
+    # Required roll_cmd to cancel:
+    #   -roll_coeff * thrust + roll_cmd * vane_max * (thrust/Tmax) = 0
+    #   roll_cmd = roll_coeff * Tmax / vane_max
+    roll_cmd = v.edf_roll_coeff * v.max_thrust / v.edf_vane_torque_max
+    cmd4 = np.array([hover, 0.0, 0.0, roll_cmd])
+    d = dyn.state_derivative(s, cmd4, v, env)
+    assert abs(d[dyn.OMEGA][2]) < 1e-9
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

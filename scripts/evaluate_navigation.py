@@ -86,6 +86,11 @@ CONTROLLERS = (
     # actuator-aware constraints ported into the convex landing MPC.
     "spacex_actuator",
     "spacex_actuator2",
+    # Roll-PID-wrapped variants: existing controller + active roll
+    # control via Command.roll_cmd (consumed by edf_vane_torque_max).
+    "pid_roll",
+    "actuator_roll",
+    "scp_warm_roll",
 )
 MODES = ("true", "measured", "estimated")
 
@@ -188,6 +193,27 @@ def make_controller(name: str, env, plant_model: str):
         return LandingControllerSpaceX(
             vehicle, env.world, planner_cls=ActuatorMagLagLandingMPC
         )
+    if name == "pid_roll":
+        from rocketsim.controllers import RollPIDWrapper
+        return RollPIDWrapper(LandingPID(vehicle, env.world), vehicle, env.world)
+    if name == "actuator_roll":
+        from rocketsim.controllers import (
+            LandingActuatorAwareWaypointPID,
+            RollPIDWrapper,
+        )
+        return RollPIDWrapper(
+            LandingActuatorAwareWaypointPID(vehicle, env.world),
+            vehicle, env.world,
+        )
+    if name == "scp_warm_roll":
+        from rocketsim.controllers import (
+            LandingScpWarm6DofWaypointPID,
+            RollPIDWrapper,
+        )
+        return RollPIDWrapper(
+            LandingScpWarm6DofWaypointPID(vehicle, env.world),
+            vehicle, env.world,
+        )
     raise ValueError(f"unknown controller: {name}")
 
 
@@ -209,9 +235,12 @@ def _run_one_episode(args):
     process, runs one episode, and returns a small dict. All work is local to
     the worker, so episodes can run in true parallel across CPU cores.
     """
-    ep, difficulty, controller_name, mode, plant_model, edf_roll, edf_roll_scale = args
+    (ep, difficulty, controller_name, mode, plant_model,
+     edf_roll, edf_roll_scale, edf_vane, edf_vane_torque_max) = args
     env = make_landing_env(
-        difficulty, edf_roll=edf_roll, edf_roll_scale=edf_roll_scale
+        difficulty,
+        edf_roll=edf_roll, edf_roll_scale=edf_roll_scale,
+        edf_vane=edf_vane, edf_vane_torque_max=edf_vane_torque_max,
     )
     env.reset(seed=ep)
     ctrl = make_controller(controller_name, env, plant_model)
@@ -295,25 +324,28 @@ def eval_mode(
     n_workers: int = 1,
     edf_roll: bool = False,
     edf_roll_scale: float = 1.0,
+    edf_vane: bool = False,
+    edf_vane_torque_max: float = 0.5,
 ):
+    env_kwargs = dict(
+        edf_roll=edf_roll, edf_roll_scale=edf_roll_scale,
+        edf_vane=edf_vane, edf_vane_torque_max=edf_vane_torque_max,
+    )
     if n_workers > 1:
         from concurrent.futures import ProcessPoolExecutor
 
         args_list = [
-            (ep, difficulty, controller_name, mode, plant_model, edf_roll, edf_roll_scale)
+            (ep, difficulty, controller_name, mode, plant_model,
+             edf_roll, edf_roll_scale, edf_vane, edf_vane_torque_max)
             for ep in range(n)
         ]
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
             results = list(ex.map(_run_one_episode, args_list, chunksize=1))
-        env_ref = make_landing_env(
-            difficulty, edf_roll=edf_roll, edf_roll_scale=edf_roll_scale
-        )
+        env_ref = make_landing_env(difficulty, **env_kwargs)
         env_ref.reset(seed=0)
         return _aggregate_results(results, env_ref)
 
-    env = make_landing_env(
-        difficulty, edf_roll=edf_roll, edf_roll_scale=edf_roll_scale
-    )
+    env = make_landing_env(difficulty, **env_kwargs)
     succ = 0
     landed = 0
     reasons: dict[str, int] = {}
@@ -513,7 +545,7 @@ def main() -> int:
         default="noisy",
         choices=[
             "calm", "moderate", "hard", "unknown", "recovery", "noisy",
-            "divert", "divert_hard",
+            "divert", "divert_hard", "spin",
         ],
         help="single difficulty; kept for compatibility",
     )
@@ -560,6 +592,18 @@ def main() -> int:
         help="scale factor on EDF roll torque/inertia (1.0 = single fan, "
              "0.1 = ~90 percent cancelled by counter-rotating fan)",
     )
+    ap.add_argument(
+        "--edf-vane",
+        action="store_true",
+        help="enable exhaust-vane roll control on the vehicle "
+             "(adds active body-z torque authority via Command.roll_cmd)",
+    )
+    ap.add_argument(
+        "--edf-vane-torque-max",
+        type=float,
+        default=0.5,
+        help="maximum vane torque (N·m at full thrust)",
+    )
     args = ap.parse_args()
 
     difficulties = (
@@ -597,6 +641,8 @@ def main() -> int:
                     n_workers=args.workers,
                     edf_roll=args.edf_roll,
                     edf_roll_scale=args.edf_roll_scale,
+                    edf_vane=args.edf_vane,
+                    edf_vane_torque_max=args.edf_vane_torque_max,
                 )
                 print_result(mode, result, args.episodes)
                 records.append(

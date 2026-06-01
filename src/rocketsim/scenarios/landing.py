@@ -70,6 +70,12 @@ class LandingScenario:
     pad_shift_time: float | None = None  # seconds; None = no shift
     pad_shift_delta_xy: tuple[float, float] = (0.0, 0.0)  # m, world frame
 
+    # Initial body-z angular velocity (rad/s) sampled uniformly in
+    # [-start_omega_z, start_omega_z].  Default 0 = no initial spin.
+    # Used by the `spin` scenario to test that the roll-control channel
+    # (Vehicle.edf_vane_torque_max) can catch a rotating vehicle.
+    start_omega_z: float = 0.0
+
     @classmethod
     def divert(cls) -> "LandingScenario":
         """Moderate IC + in-flight pad shift (+10m X) at t=2s. Designed to
@@ -94,6 +100,21 @@ class LandingScenario:
             timeout=35.0,
             pad_shift_time=2.0,
             pad_shift_delta_xy=(10.0, 0.0),
+        )
+
+    @classmethod
+    def spin(cls) -> "LandingScenario":
+        """Start with a substantial body-z angular velocity (~286°/s)
+        on top of an otherwise moderate hover IC.  Tests whether an
+        active roll-control channel (Vehicle.edf_vane_torque_max +
+        RollPIDWrapper) can damp the spin before the soft-landing
+        thresholds force a failure.  Roll error doesn't directly hurt
+        the touchdown gate (offset/vspeed/hspeed/tilt all ignore yaw),
+        so the practical metric is whether the spin destabilizes the
+        attitude PID enough to crash."""
+        return cls(
+            start_omega_z=5.0,  # rad/s -> ~286°/s
+            timeout=25.0,
         )
 
     @classmethod
@@ -154,10 +175,15 @@ class LandingScenario:
         q = np.array(
             [np.cos(half), np.sin(half) * np.cos(axis_ang), np.sin(half) * np.sin(axis_ang), 0.0]
         )
+        # Initial body-z spin (scenarios that don't set start_omega_z
+        # default to 0 so existing behavior is unchanged).
+        omega_z = rng.uniform(-self.start_omega_z, self.start_omega_z) * scale \
+            if self.start_omega_z > 0 else 0.0
         return dyn.initial_state(
             position=(px, py, alt),
             velocity=(vxy[0], vxy[1], vz),
             quaternion=q,
+            omega=(0.0, 0.0, omega_z),
         )
 
     # --- termination & success ---------------------------------------------

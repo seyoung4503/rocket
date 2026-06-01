@@ -58,6 +58,17 @@ class Vehicle:
     edf_fan_inertia: float = 0.0  # kg·m^2
     edf_fan_omega_max: float = 0.0  # rad/s at full thrust
 
+    # ─── Exhaust vane roll control (opt-in active actuator) ────────
+    # V-2-style mechanical vanes in the EDF exhaust flow create a
+    # body-z torque proportional to the commanded roll deflection and
+    # the current thrust (because vane authority comes from the
+    # exhaust momentum flux).  When set > 0, the simulator interprets
+    # a fourth Command channel `roll_cmd` (clipped to [-1, 1]) as
+    #     tau_z_vane = roll_cmd * edf_vane_torque_max * (thrust / max_thrust)
+    # 0.5 N·m at full thrust is a reasonable starting estimate for
+    # four small vanes in a 90 mm EDF exhaust.
+    edf_vane_torque_max: float = 0.0  # N·m at full thrust
+
     def __post_init__(self) -> None:
         self.thrust_misalign = np.asarray(self.thrust_misalign, dtype=float)
         self.inertia = np.asarray(self.inertia, dtype=float)
