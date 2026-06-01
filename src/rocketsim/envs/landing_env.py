@@ -83,7 +83,11 @@ class LandingEnv(gym.Env):
         self.n_stack = max(1, int(n_stack))
         self._frames: deque | None = None
 
-        self.action_space = spaces.Box(-1.0, 1.0, shape=(3,), dtype=np.float32)
+        # 4-dim action: [throttle (-1..1 -> 0..1), gimbal_x, gimbal_y, roll_cmd]
+        # The 4th channel feeds the optional exhaust-vane roll torque
+        # (Vehicle.edf_vane_torque_max); when the vane is disabled the
+        # value is ignored, so 4-dim works on vanilla EDFs too.
+        self.action_space = spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32)
         high = np.full(13 * self.n_stack, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(-high, high, dtype=np.float32)
 
@@ -148,14 +152,23 @@ class LandingEnv(gym.Env):
         throttle = float((a[0] + 1.0) / 2.0)
         gx = float(a[1] * self.base.gimbal_limit)
         gy = float(a[2] * self.base.gimbal_limit)
-        return Command(throttle=throttle, gimbal_x=gx, gimbal_y=gy)
+        # The 4th channel is the raw roll vane command in [-1, 1].  Older
+        # 3-element actions (e.g. from RL models trained before vane
+        # support) default to roll 0 so they still work.
+        roll_cmd = float(a[3]) if a.shape[0] > 3 else 0.0
+        return Command(
+            throttle=throttle, gimbal_x=gx, gimbal_y=gy, roll_cmd=roll_cmd
+        )
 
     def command_to_action(self, cmd: Command) -> np.ndarray:
         """Inverse map, so a PID controller can be evaluated through this env."""
         a0 = 2.0 * cmd.throttle - 1.0
         a1 = cmd.gimbal_x / self.base.gimbal_limit
         a2 = cmd.gimbal_y / self.base.gimbal_limit
-        return np.clip(np.array([a0, a1, a2], dtype=np.float32), -1.0, 1.0)
+        a3 = float(cmd.roll_cmd)
+        return np.clip(
+            np.array([a0, a1, a2, a3], dtype=np.float32), -1.0, 1.0
+        )
 
     # --- gym API ------------------------------------------------------------
 
@@ -191,7 +204,12 @@ class LandingEnv(gym.Env):
         for _ in range(self.n_sub):
             delta = np.clip(target_gimbal - self._prev_gimbal, -max_delta, max_delta)
             self._prev_gimbal = self._prev_gimbal + delta
-            applied = np.array([cmd.throttle, self._prev_gimbal[0], self._prev_gimbal[1]])
+            applied = np.array([
+                cmd.throttle,
+                self._prev_gimbal[0],
+                self._prev_gimbal[1],
+                cmd.roll_cmd,
+            ])
 
             wind, fext = self.disturbance.step(self.t, self.sim_dt, self._rng)
             prev_t = self.t
@@ -241,6 +259,8 @@ def make_landing_env(
     difficulty: str = "calm",
     edf_roll: bool = False,
     edf_roll_scale: float = 1.0,
+    edf_vane: bool = False,
+    edf_vane_torque_max: float = 0.5,
     **kwargs,
 ) -> LandingEnv:
     """Factory: difficulty in
@@ -274,6 +294,13 @@ def make_landing_env(
         # divert composed with the hard IC + hard disturbance preset.
         dist, rand = D.hard()
         scenario = LandingScenario.divert_hard()
+    elif difficulty == "spin":
+        # Vehicle starts with ~286 deg/s body-z spin on top of an
+        # otherwise moderate IC.  Designed to be combined with
+        # edf_roll=True + edf_vane=True so the roll-PID wrapper has
+        # something to damp.
+        dist, rand = D.moderate()
+        scenario = LandingScenario.spin()
     else:
         dist, rand = presets[difficulty]()
         scenario = LandingScenario.hard() if difficulty == "hard" else LandingScenario()
@@ -288,4 +315,10 @@ def make_landing_env(
             v.edf_roll_coeff = 0.012 * scale  # N·m per N thrust
             v.edf_fan_inertia = 1.0e-4 * scale  # kg·m² (effective net spin)
             v.edf_fan_omega_max = 4000.0  # rad/s at max thrust (per fan)
+    if edf_vane:
+        # Equip the vehicle with V-2-style exhaust vanes for active
+        # roll control.  Authority = edf_vane_torque_max * (thrust/Tmax)
+        # in body-z when the controller drives Command.roll_cmd.
+        for v in (env.base, env.vehicle):
+            v.edf_vane_torque_max = float(edf_vane_torque_max)
     return env
