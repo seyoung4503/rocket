@@ -34,9 +34,15 @@ class Command:
     throttle: float = 0.0  # [0, 1]
     gimbal_x: float = 0.0  # rad, deflection about body x-axis
     gimbal_y: float = 0.0  # rad, deflection about body y-axis
+    # Optional fourth channel — roll vane deflection in [-1, 1].
+    # Defaults to 0 so existing controllers stay backwards compatible.
+    # Only takes effect when Vehicle.edf_vane_torque_max > 0.
+    roll_cmd: float = 0.0
 
     def as_array(self) -> np.ndarray:
-        return np.array([self.throttle, self.gimbal_x, self.gimbal_y])
+        return np.array(
+            [self.throttle, self.gimbal_x, self.gimbal_y, self.roll_cmd]
+        )
 
 
 def initial_state(
@@ -89,6 +95,10 @@ def state_derivative(
     # the controller), then the physical gimbal limit clamps the total.
     gx = float(np.clip(cmd[1] + vehicle.thrust_misalign[0], -vehicle.gimbal_limit, vehicle.gimbal_limit))
     gy = float(np.clip(cmd[2] + vehicle.thrust_misalign[1], -vehicle.gimbal_limit, vehicle.gimbal_limit))
+    # Optional 4th command channel: roll vane deflection in [-1, 1].
+    # Older controllers emit a 3-element array; default to zero so the
+    # vane torque term below is a no-op when no roll command is given.
+    roll_cmd = float(np.clip(cmd[3], -1.0, 1.0)) if len(cmd) > 3 else 0.0
 
     # --- Forces ---
     dir_body = thrust_direction_body(gx, gy)
@@ -134,6 +144,16 @@ def state_derivative(
             [0.0, 0.0, vehicle.edf_fan_inertia * omega_fan]
         )
         torque_body = torque_body - np.cross(omega, H_fan_body)
+
+    # --- Optional exhaust-vane roll control ---
+    # Authority scales with current thrust (exhaust momentum flux).
+    if vehicle.edf_vane_torque_max > 0.0 and abs(roll_cmd) > 1e-9:
+        vane_tau_z = (
+            roll_cmd
+            * vehicle.edf_vane_torque_max
+            * (max(thrust, 0.0) / vehicle.max_thrust)
+        )
+        torque_body = torque_body + np.array([0.0, 0.0, vane_tau_z])
 
     ang_accel = vehicle.inertia_inv @ (torque_body - np.cross(omega, vehicle.inertia @ omega))
 
