@@ -14,6 +14,7 @@ from .mpc import (
     SampledVerticalMPC,
 )
 from .pid import HoverPID
+from .roll_wrapper import RollPIDWrapper
 from .scp_6dof_mpc import (
     CvxpyScp6DofMPC,
     CvxpyScpFull6DofMPC,
@@ -36,6 +37,7 @@ from .trajectory_tracker import (
 __all__ = [
     "HoverPID",
     "LandingPID",
+    "RollPIDWrapper",
     "LandingVerticalMPC",
     "SampledVerticalMPC",
     "LandingCvxpyMPC",
