@@ -608,4 +608,18 @@ Step 1 → Step 2 **hard +8pp, noisy +6pp**. 모든 landed_fail 카테고리에�
 
 자료: `docs/2026-05-29_2203_v1_scp_full_results.md` (raw), `docs/2026-05-29_2212_v1_scp_full_analysis.md`, `docs/2026-05-29_2222_v1_edf_roll_implementation.md`.
 
+## 2026-06-03 11:39 (KST) — 첫 실기 보드 bring-up (STM32F407G-DISC1)
+
+시뮬→실기 첫 발. 가용한 STM32F4-Discovery(STM32F407VGT6, Cortex-M4F 168MHz/FPU)로 툴체인·플래시·GPIO·라이브 텔레메트리 경로 검증. 최종 FC는 H7 목표([hardware.md](hardware.md) A.3)지만 F407도 PID/MEKF 루프엔 충분.
+
+**식별/툴체인**: chip `0x413`, Flash 1MB, SRAM 128KB@0x20000000(+CCM 64KB@0x10000000 비연속). 온보드 ST-LINK/V2-A(mini-USB). brew로 `stlink`/`open-ocd`/`arm-none-eabi-gcc`(GCC16)/`binutils` 설치.
+
+**검증**: (1) `st-info` 칩 식별. (2) **LED** PD12~15 — 펌웨어 없이 OpenOCD 레지스터 write로 러닝라이트. (3) bare-metal 빌드/플래시(`program verify`). (4) **라이브 텔레메트리** — 펌웨어가 RAM `0x20000000`에 magic/heartbeat 기록, `monitor.cfg`(OpenOCD Tcl halt/read_memory/resume 루프)로 폴링 → 칩→Mac 실시간 데이터가 기존 ST-Link USB로 흐름 확인. (5) **온보드 가속도계** SPI1 — WHO_AM_I=0x3F(LIS3DSH), 중력 3축 실시간 측정. (6) 유저버튼 PA0, 고유ID, Flash 1MB, CPUID(Cortex-M4) 확인.
+
+**함정 2개**: (a) Discovery ST-Link VCP는 칩 USART에 미배선 → 일반 시리얼 무신호. 진짜 UART는 외부 USB-TTL(PA2/PA3) 필요. 세미호스팅은 hla 서버 모드서 콘솔 출력 미표면화 → RAM-poll로 대체. (b) **F407 SRAM은 0x20000000에 128KB**(CCM 64KB는 비연속). `st-info`가 192KB로 보고해 오해 → `_estack`을 0x20030000로 잡았다가 Reset 첫 `push`에서 즉시 HardFault(main 진입 실패). `_estack ≤ 0x20020000`.
+
+**다음**: 가속도계→자세 추정, PWM(TVC/EDF), 클럭 168MHz, 외부 IMU/기압계, 시뮬 PID/MEKF 포팅.
+
+자료: `docs/2026-06-03_1139_v1_disco_f407_bringup.md`. 코드: `firmware/disco_serial_test/`(텔레메트리), `firmware/disco_accel_test/`(가속도계).
+
 <!-- 새 항목은 이 줄 위에 추가 -->
